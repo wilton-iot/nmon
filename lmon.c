@@ -1,4 +1,4 @@
-/* 
+/*
  * lmon.c -- Curses based Performance Monitor for Linux
  * Developer: Nigel Griffiths. 
  */
@@ -23,7 +23,7 @@ nmon: lnmon.o
 #define RAW(member)      (long)((long)(p->cpuN[i].member)   - (long)(q->cpuN[i].member))
 #define RAWTOTAL(member) (long)((long)(p->cpu_total.member) - (long)(q->cpu_total.member)) 
 
-#define VERSION "15f" 
+#define VERSION "15g" 
 char version[] = VERSION;
 static char *SccsId = "nmon " VERSION;
 
@@ -46,6 +46,30 @@ static char *SccsId = "nmon " VERSION;
 #include <sys/time.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
+
+/* Windows moved here so they can be cleared when the screen mode changes */
+WINDOW * padwelcome = NULL;
+WINDOW * padtop = NULL;
+WINDOW * padmem = NULL;
+WINDOW * padlarge = NULL;
+WINDOW * padpage = NULL;
+WINDOW * padker = NULL;
+WINDOW * padnet = NULL;
+WINDOW * padneterr = NULL;
+WINDOW * padnfs = NULL;
+WINDOW * padcpu = NULL;
+WINDOW * padsmp = NULL;
+WINDOW * padlong = NULL;
+WINDOW * paddisk = NULL;
+WINDOW * paddg = NULL;
+WINDOW * padmap = NULL;
+WINDOW * padjfs = NULL;
+#ifdef POWER
+	WINDOW * padlpar = NULL;
+#endif
+WINDOW * padverb = NULL;
+WINDOW * padhelp = NULL;
+
 
 /* for Disk Busy rain style output covering 100's of diskss on one screen */
 const char disk_busy_map_ch[] =
@@ -313,8 +337,11 @@ struct procsinfo {
                 unsigned long statm_drs;        /* data/stack */
                 unsigned long statm_lrs;        /* library */
                 unsigned long statm_dt;         /* dirty pages */
-};
 
+                unsigned long long read_io;     /* storage read bytes */
+                unsigned long long write_io;    /* storage write bytes */
+};
+int isroot = 0;
 
 #include <mntent.h>
 #include <fstab.h>
@@ -376,7 +403,6 @@ int	show_kernel  = 0;
 int	show_nfs     = 0;
 int	show_net     = 0;
 int	show_neterror= 0;
-int	show_partitions  = 0;
 int	show_help    = 0;
 int	show_top     = 0;
 int	show_topmode = 1;
@@ -669,7 +695,7 @@ struct dsk_stat {
 	ulong	dk_bsize;
 	ulong	dk_time;
 	ulong	dk_inflight;
-	ulong	dk_11;
+	ulong	dk_backlog;
 	ulong	dk_partition;
 	ulong	dk_blocks; /* in /proc/partitions only */
 	ulong	dk_use;
@@ -1815,7 +1841,7 @@ int ret;
 		p->dk[i].dk_wmsec =
 		p->dk[i].dk_inflight =
 		p->dk[i].dk_time =
-		p->dk[i].dk_11 =0;
+		p->dk[i].dk_backlog =0;
 
 		ret = sscanf(&buf[0], "%d %d %s %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu",
 			&p->dk[i].dk_major,
@@ -1831,7 +1857,7 @@ int ret;
 			&p->dk[i].dk_wmsec,
 			&p->dk[i].dk_inflight,
 			&p->dk[i].dk_time,
-			&p->dk[i].dk_11 );
+			&p->dk[i].dk_backlog );
 		if(ret == 7) { /* shuffle the data around due to missing columns for partitions */
 			p->dk[i].dk_partition = 1;
 			p->dk[i].dk_wkb = p->dk[i].dk_rmsec;
@@ -2665,14 +2691,12 @@ void list_dgroup(struct dsk_stat *dk)
 				fprintf(fp, ",%s", dgroup_name[i]);
 		}
 		fprintf(fp, "\n");
-#ifdef EXPERIMENTAL
-		fprintf(fp, "DGF11,Disk Group field 11 %s", hostname);
+		fprintf(fp, "DGBACKLOG,Disk Group Backlog time (ms) %s", hostname);
 		for (i = 0; i < DGROUPS; i++) {
 			if (dgroup_name[i] != 0)
 				fprintf(fp, ",%s", dgroup_name[i]);
 		}
 		fprintf(fp, "\n");
-#endif /*EXPERIMENTAL*/
 	}
 }
 
@@ -2777,6 +2801,7 @@ void help(void)
 	printf("\tg   = User Defined Disk Groups        (assumes -g <file> when nmon started)\n");
 	printf("\tG   = Change Disk stats to just disks (assumes -g auto   when nmon started)\n");
 	printf("\tj   = File Systems \n");
+	printf("\tt   = Top Process stats: select the data & order 1=Basic, 3=Perf 4=Size 5=I/O=root only\n");
 	printf("\tt   = Top Process stats use 1,3,4,5 to select the data & order\n");
 	printf("\tu   = Top Process full command details\n");
 	printf("\tv   = Verbose mode - tries to make recommendations\n");
@@ -2889,6 +2914,8 @@ static int jfs_loaded = 0;
 
 /* We order this array rather than the actual process tables
  * the index is the position in the process table and
+ * the size is the memory used  in bytes
+ * the io is the storge I/O performed in the the last period in bytes 
  * the time is the CPU used in the last period in seconds
  */
 struct topper {
@@ -2911,7 +2938,7 @@ int	size_compare(const void *a, const void *b)
 	return (int)((((struct topper *)b)->size - ((struct topper *)a)->size));
 }
 
-int	disk_compare(void *a, void *b)
+int	disk_compare(const void *a, const void *b)
 {
 	return (int)((((struct topper *)b)->io - ((struct topper *)a)->io));
 }
@@ -2976,7 +3003,7 @@ int checkinput(void)
 						show_top = 1;
 						show_topmode =3;
 					}
-					clear();
+					wclear(paddisk);
 					break;
 				case '?':
 				case 'h':
@@ -2987,7 +3014,7 @@ int checkinput(void)
 						show_help = 1;
 						show_verbose = 0;
 					}
-					clear();
+					wclear(padhelp);
 					break;
 				case 'b':
 				case 'B':
@@ -2997,45 +3024,41 @@ int checkinput(void)
 				case 'Z':
 					FLIP(show_raw);
 					show_smp=1;
-					clear();
+					wclear(padsmp);
 					break;
 				case 'l':
 					FLIP (show_longterm);
-					clear();
+					wclear(padlong);
 					break;
+#ifdef POWER
 				case 'p':
 					FLIP(show_lpar);
-					clear();
+					wclear(padlpar);
 					break;
+#endif
 				case 'V':
 					FLIP(show_vm);
-					clear();
+					wclear(padpage);
 					break;
 				case 'j':
 				case 'J':
 					FLIP(show_jfs);
 					jfs_load(show_jfs);
-					clear();
+					wclear(padjfs);
 					break;
-#ifdef PARTITIONS
-				case 'P':
-					FLIP(show_partitions);
-					clear();
-					break;
-#endif /*PARTITIONS*/
 				case 'k':
 				case 'K':
 					FLIP(show_kernel);
-					clear();
+					wclear(padker);
 					break;
 				case 'm':
 				case 'M':
 					FLIP(show_memory);
-					clear();
+					wclear(padmem);
 					break;
 				case 'L':
 					FLIP(show_large);
-					clear();
+					wclear(padlarge);
 					break;
 				case 'D':
 					switch (show_disk) {
@@ -3049,7 +3072,7 @@ int checkinput(void)
 						show_disk = SHOW_DISK_STATS; 
 						break;
 					}
-					clear();
+					wclear(paddisk);
 					break;
 				case 'd':
 					switch (show_disk) {
@@ -3063,12 +3086,12 @@ int checkinput(void)
 						show_disk = 0; 
 						break;
 					}
-					clear();
+					wclear(paddisk);
 					break;
 				case 'o':
 				case 'O':
 					FLIP(show_diskmap);
-					clear();
+					wclear(padmap);
 					break;
 				case 'n':
 					if (show_net) {
@@ -3078,7 +3101,7 @@ int checkinput(void)
 						show_net = 1;
 						show_neterror = 3;
 					}
-					clear();
+					wclear(padnet);
 					break;
 				case 'N':
 					if(show_nfs == 0)
@@ -3090,27 +3113,27 @@ int checkinput(void)
 					else if(show_nfs == 3)
 						show_nfs = 0;
 					nfs_clear=1;
-					clear();
+					wclear(padnfs);
 					break;
 				case 'c':
 				case 'C':
 					FLIP(show_smp);
-					clear();
+					wclear(padsmp);
 					break;
 				case 'r':
 				case 'R':
 					FLIP(show_cpu);
-					clear();
+					wclear(padcpu);
 					break;
 				case 't':
 					show_topmode = 3; /* Fall Through */
 				case 'T':
 					FLIP(show_top);
-					clear();
+					wclear(padtop);
 					break;
 				case 'v':
 					FLIP(show_verbose);
-					clear();
+					wclear(padverb);
 					break;
 				case 'u':
 					if (show_args == ARGS_NONE) {
@@ -3123,12 +3146,12 @@ int checkinput(void)
 						 show_topmode = 3;
 					} else 
 						show_args = ARGS_NONE;
-					clear();
+					wclear(padtop);
 					break;
 				case '1':
 					show_topmode = 1;
 					show_top = 1;
-					clear();
+					wclear(padtop);
 					break;
 /*
 				case '2':
@@ -3140,17 +3163,19 @@ int checkinput(void)
 				case '3':
 					show_topmode = 3;
 					show_top = 1;
-					clear();
+					wclear(padtop);
 					break;
 				case '4':
 					show_topmode = 4;
 					show_top = 1;
-					clear();
+					wclear(padtop);
 					break;
 				case '5':
-					show_topmode = 5;
-					show_top = 1;
-					clear();
+					if(isroot) {
+						show_topmode = 5;
+						show_top = 1;
+						wclear(padtop);
+					}
 					break;
 				case '0':
 					for(i=0;i<(max_cpus+1);i++)
@@ -3180,7 +3205,7 @@ int checkinput(void)
                                         break;
 				case 'g':
 					FLIP(show_dgroup);
-                                        clear();
+                                        wclear(paddg);
                                         break;
 
 				default: return 0;
@@ -3210,7 +3235,6 @@ void go_background(int def_loops, int def_secs)
 	show_all     = 1;
 	show_top     = 0; /* top process */
 	show_topmode = 3;
-	show_partitions = 1;
 	show_lpar = 1;
 	show_vm   = 1;
 }
@@ -3283,6 +3307,7 @@ char buf[1024*4];
 int size=0;
 int ret=0;
 int count=0;
+int i;
 
 	sprintf(filename,"/proc/%d/stat",pid);
 	if( (fp = fopen(filename,"r")) == NULL) {
@@ -3411,8 +3436,28 @@ int count=0;
 		fprintf(stderr,"sscanf wanted 7 returned = %d line=%s\n", ret,buf);
 		return 0;
 	}
+	if(isroot) {
+		p->procs[index].read_io = 0;
+		p->procs[index].write_io = 0;
+		sprintf(filename,"/proc/%d/io",pid);
+		if( (fp = fopen(filename,"r")) != NULL) {
+			for(i=0;i<6;i++) {
+				if(fgets(buf,1024,fp) == NULL) {
+					break;
+				}
+				if(strncmp("read_bytes:",  buf, 11) == 0 )
+					sscanf(&buf[12], "%lld", &p->procs[index].read_io);
+				if(strncmp("write_bytes:", buf, 12) == 0 )
+					sscanf(&buf[13], "%lld", &p->procs[index].write_io);
+			}	
+		} 
+
+		if (fp != NULL) 
+			fclose(fp); 
+	}
 	return 1;
 }
+
 #ifdef DEBUGPROC 
 print_procs(int index)
 {
@@ -3630,6 +3675,7 @@ int main(int argc, char **argv)
 #endif /* POWER */
 	int	smp_first_time =1;
 	int	proc_first_time =1;
+	int	first_key_pressed = 0;
 	pid_t childpid = -1;
 	int ralfmode = 0;
 	char	pgrp[32];
@@ -3675,26 +3721,6 @@ int main(int argc, char **argv)
 	float v4c_total;
 	float v4s_total;
 	int errors=0;
-	WINDOW * padmem = NULL;
-	WINDOW * padlarge = NULL;
-	WINDOW * padpage = NULL;
-	WINDOW * padker = NULL;
-	WINDOW * padnet = NULL;
-	WINDOW * padneterr = NULL;
-	WINDOW * padnfs = NULL;
-	WINDOW * padcpu = NULL;
-	WINDOW * padsmp = NULL;
-	WINDOW * padlong = NULL;
-	WINDOW * paddisk = NULL;
-	WINDOW * paddg = NULL;
-	WINDOW * padmap = NULL;
-	WINDOW * padtop = NULL;
-	WINDOW * padjfs = NULL;
-#ifdef POWER
-	WINDOW * padlpar = NULL;
-#endif
-	WINDOW * padverb = NULL;
-	WINDOW * padhelp = NULL;
 
         char  *nmon_start = (char *)NULL;
         char  *nmon_end   = (char *)NULL;
@@ -3708,7 +3734,12 @@ int main(int argc, char **argv)
         int   time_stamp_type =0;
         unsigned long  pagesize = 1024*4; /* Default page size is 4 KB but newer servers compiled with 64 KB pages */
 	float average;
-
+	struct timeval nmon_tv; /* below is used to workout the nmon run, accumalate it and the 
+				   allow for in in the sleep time  to reduce time drift */
+	double nmon_start_time = 0.0;
+	double nmon_end_time = 0.0;
+	double nmon_run_time = -1.0;	
+	int seconds_over = 0;
 
 #define MAXROWS 256
 #define MAXCOLS 150 /* changed to allow maximum column widths */
@@ -3722,7 +3753,7 @@ int main(int argc, char **argv)
 
 #define DISPLAY(pad,rows) { \
                         if(x+2+(rows)>LINES)\
-                                pnoutrefresh(pad, 0,0,x,1,LINES-2,COLS-2); \
+                                pnoutrefresh(pad, 0,0,x,1,LINES-2, COLS-2); \
                         else \
                                 pnoutrefresh(pad, 0,0,x,1,x+rows+1,COLS-2); \
                         x=x+(rows);     \
@@ -3797,6 +3828,9 @@ printf("TIMESTAMP=%d.\n",time_stamp_type);
 			hostname[i] = 0;
 	if(run_name_set == 0)
 		strcpy(run_name,hostname);
+
+	if( getuid() == 0)
+		isroot=1;
 
 	/* Check the version of OS */
 	uname(&uts);
@@ -4041,6 +4075,7 @@ printf("TIMESTAMP=%d.\n",time_stamp_type);
 #ifdef POWER
 		padlpar = newpad(11,MAXCOLS);
 #endif
+		padwelcome = newpad(24,MAXCOLS);
 		padmap = newpad(24,MAXCOLS);
 		padhelp = newpad(24,MAXCOLS);
 		padmem = newpad(20,MAXCOLS);
@@ -4319,7 +4354,8 @@ printf("TIMESTAMP=%d.\n",time_stamp_type);
 	     }
 	/* To get the pointers setup */
 	/* Was already done earlier, DONT'T switch back here to the old pointer! - switcher(); */
-	checkinput();
+	/*checkinput();*/
+	clear();
 	fflush(NULL);
 #ifdef POWER 
 lparcfg.timebase = -1; 
@@ -4369,21 +4405,22 @@ lparcfg.timebase = -1;
 
 			if(welcome && getenv("NMON") == 0) {
 
-					COLOUR attrset(COLOR_PAIR(2));
-mvprintw(x+1, 3, "------------------------------");
-mvprintw(x+2, 3, "#    #  #    #   ####   #    #");
-mvprintw(x+3, 3, "##   #  ##  ##  #    #  ##   #");
-mvprintw(x+4, 3, "# #  #  # ## #  #    #  # #  #");
-mvprintw(x+5, 3, "#  # #  #    #  #    #  #  # #");
-mvprintw(x+6, 3, "#   ##  #    #  #    #  #   ##");
-mvprintw(x+7, 3, "#    #  #    #   ####   #    #");
-mvprintw(x+8, 3, "------------------------------");
-					COLOUR attrset(COLOR_PAIR(0));
-mvprintw(x+1, 40, "For help type H or ...");
-mvprintw(x+2, 40, " nmon -?  - hint");
-mvprintw(x+3, 40, " nmon -h  - full");
-mvprintw(x+5, 40, "To start the same way every time");
-mvprintw(x+6, 40, " set the NMON ksh variable");
+					COLOUR wattrset(padwelcome,COLOR_PAIR(2));
+mvwprintw(padwelcome,x+1, 3, "------------------------------");
+mvwprintw(padwelcome,x+2, 3, "#    #  #    #   ####   #    #");
+mvwprintw(padwelcome,x+3, 3, "##   #  ##  ##  #    #  ##   #");
+mvwprintw(padwelcome,x+4, 3, "# #  #  # ## #  #    #  # #  #");
+mvwprintw(padwelcome,x+5, 3, "#  # #  #    #  #    #  #  # #");
+mvwprintw(padwelcome,x+6, 3, "#   ##  #    #  #    #  #   ##");
+mvwprintw(padwelcome,x+7, 3, "#    #  #    #   ####   #    #");
+mvwprintw(padwelcome,x+8, 3, "------------------------------");
+					COLOUR wattrset(padwelcome,COLOR_PAIR(0));
+mvwprintw(padwelcome,x+1, 40, "For help type H or ...");
+mvwprintw(padwelcome,x+2, 40, " nmon -?  - hint");
+mvwprintw(padwelcome,x+3, 40, " nmon -h  - full");
+mvwprintw(padwelcome,x+5, 40, "To start the same way every time");
+mvwprintw(padwelcome,x+6, 40, " set the NMON ksh variable");
+					COLOUR wattrset(padwelcome,COLOR_PAIR(1));
 #ifdef POWER
 get_cpu_cnt();
 proc_read(P_CPUINFO);
@@ -4394,59 +4431,62 @@ switch(power_vm_type) {
 case VM_POWERKVM_GUEST: 
 get_cpu_cnt();
 #ifdef RHEL7
-	mvprintw(x+ 9, 3, "%s %s", easy[0], easy[1]);
+	mvwprintw(padwelcome,x+ 9, 3, "%s %s", easy[0], easy[1]);
 #else
 #ifdef SLES113
-	mvprintw(x+ 9, 3, "%s", easy[2]);
+	mvwprintw(x+ 9, 3, "%s", easy[2]);
 #else
-	mvprintw(x+ 9, 3, "%s", easy[3]);
+	mvwprintw(x+ 9, 3, "%s", easy[3]);
 #endif /* SLES113 */
 #endif /* RHEL7 */
-	mvprintw(x+10, 3, "PowerKVM Guest %s", &proc[P_CPUINFO].line[1][7]);
-	mvprintw(x+11, 3, "PowerKVM Guest VirtualCPUs=%d LogicalCPUs=%d", (int)lparcfg.partition_active_processors, cpus);
-	mvprintw(x+12, 3, "PowerKVM Guest SMT=%d", lparcfg.smt_mode);
+	mvwprintw(padwelcome,x+10, 3, "PowerKVM Guest %s", &proc[P_CPUINFO].line[1][7]);
+	mvwprintw(padwelcome,x+11, 3, "PowerKVM Guest VirtualCPUs=%d LogicalCPUs=%d", (int)lparcfg.partition_active_processors, cpus);
+	mvwprintw(padwelcome,x+12, 3, "PowerKVM Guest SMT=%d", lparcfg.smt_mode);
 	break;
 case VM_POWERKVM_HOST:
-	mvprintw(x+ 9, 3, "%s", easy[0]);
-	mvprintw(x+10, 3, "PowerKVM Host %s", &proc[P_CPUINFO].line[1][7]);
-	mvprintw(x+11, 3, "PowerKVM Host owns all %d CPUs & SMT=off in the Hosting OS", cpus);
-	mvprintw(x+12, 3, "PowerKVM Host %s", proc[P_CPUINFO].line[proc[P_CPUINFO].lines-2]);
+	mvwprintw(padwelcome,x+ 9, 3, "%s", easy[0]);
+	mvwprintw(padwelcome,x+10, 3, "PowerKVM Host %s", &proc[P_CPUINFO].line[1][7]);
+	mvwprintw(padwelcome,x+11, 3, "PowerKVM Host owns all %d CPUs & SMT=off in the Hosting OS", cpus);
+	mvwprintw(padwelcome,x+12, 3, "PowerKVM Host %s", proc[P_CPUINFO].line[proc[P_CPUINFO].lines-2]);
 	break;
 case VM_NATIVE:
-	mvprintw(x+ 9, 3, "%s", easy[0]);
-	mvprintw(x+10, 3, "Native %s", &proc[P_CPUINFO].line[1][7]);
-	mvprintw(x+11, 3, "Native owns all %d CPUs & SMT=off in the Hosting OS", cpus);
-	mvprintw(x+12, 3, "Native %s", proc[P_CPUINFO].line[proc[P_CPUINFO].lines-2]);
+	mvwprintw(padwelcome,x+ 9, 3, "%s", easy[0]);
+	mvwprintw(padwelcome,x+10, 3, "Native %s", &proc[P_CPUINFO].line[1][7]);
+	mvwprintw(padwelcome,x+11, 3, "Native owns all %d CPUs & SMT=off in the Hosting OS", cpus);
+	mvwprintw(padwelcome,x+12, 3, "Native %s", proc[P_CPUINFO].line[proc[P_CPUINFO].lines-2]);
 	break;
 default:
 case VM_POWERVM:
-	mvprintw(x+ 9, 3, "%s", easy[3]);
-	mvprintw(x+10, 3, "PowerVM %s %s", &proc[P_CPUINFO].line[1][7], &proc[P_CPUINFO].line[proc[P_CPUINFO].lines-1][11]);
-	mvprintw(x+11, 3, "PowerVM Entitlement=%-6.2f VirtualCPUs=%d LogicalCPUs=%d", 
+	mvwprintw(padwelcome,x+ 9, 3, "%s", easy[3]);
+	mvwprintw(padwelcome,x+10, 3, "PowerVM %s %s", &proc[P_CPUINFO].line[1][7], &proc[P_CPUINFO].line[proc[P_CPUINFO].lines-1][11]);
+	mvwprintw(padwelcome,x+11, 3, "PowerVM Entitlement=%-6.2f VirtualCPUs=%d LogicalCPUs=%d", 
 		(double)lparcfg.partition_entitled_capacity/100.0, (int)lparcfg.partition_active_processors, cpus);
-	mvprintw(x+12, 3, "PowerVM SMT=%d Capped=%d", lparcfg.smt_mode, lparcfg.capped);
+	mvwprintw(padwelcome,x+12, 3, "PowerVM SMT=%d Capped=%d", lparcfg.smt_mode, lparcfg.capped);
 	break;
 }
 
-mvprintw(x+13, 3, "Processor Clock=%s             %s", &proc[P_CPUINFO].line[2][9], endian);
+mvwprintw(padwelcome,x+13, 3, "Processor Clock=%s             %s", &proc[P_CPUINFO].line[2][9], endian);
 
 #endif
 #ifdef X86
 get_cpu_cnt();
-mvprintw(x+10, 3, "x86 %s %s", vendor_ptr, model_ptr);
-mvprintw(x+11, 3, "x86 MHz=%s bogomips=%s", mhz_ptr,bogo_ptr);
+mvwprintw(padwelcome,x+10, 3, "x86 %s %s", vendor_ptr, model_ptr);
+mvwprintw(padwelcome,x+11, 3, "x86 MHz=%s bogomips=%s", mhz_ptr,bogo_ptr);
 if(processorchips || cores || hyperthreads || cpus) {
-mvprintw(x+12, 3, "x86 ProcessorChips=%d PhyscalCores=%d", processorchips, cores);
-mvprintw(x+13, 3, "x86 Hyperthreads  =%d VirtualCPUs =%d", hyperthreads, cpus);
+mvwprintw(padwelcome,x+12, 3, "x86 ProcessorChips=%d PhyscalCores=%d", processorchips, cores);
+mvwprintw(padwelcome,x+13, 3, "x86 Hyperthreads  =%d VirtualCPUs =%d", hyperthreads, cpus);
 }
 #endif
-mvprintw(x+15, 3, "Use these keys to toggle statistics on/off:");
-mvprintw(x+16, 3, "   c = CPU        l = CPU Long-term   - = Faster screen updates");
-mvprintw(x+17, 3, "   m = Memory     j = Filesystems     + = Slower screen updates");
-mvprintw(x+18, 3, "   d = Disks      n = Network         V = Virtual Memory");
-mvprintw(x+19, 3, "   r = Resource   N = NFS             v = Verbose hints");
-mvprintw(x+20, 3, "   k = kernel     t = Top-processes   . = only busy disks/procs");
-mvprintw(x+21, 3, "   h = more options                   q = Quit");
+					COLOUR wattrset(padwelcome,COLOR_PAIR(0));
+mvwprintw(padwelcome,x+15, 3, "Use these keys to toggle statistics on/off:");
+mvwprintw(padwelcome,x+16, 3, "   c = CPU        l = CPU Long-term   - = Faster screen updates");
+mvwprintw(padwelcome,x+17, 3, "   m = Memory     j = Filesystems     + = Slower screen updates");
+mvwprintw(padwelcome,x+18, 3, "   d = Disks      n = Network         V = Virtual Memory");
+mvwprintw(padwelcome,x+19, 3, "   r = Resource   N = NFS             v = Verbose hints");
+mvwprintw(padwelcome,x+20, 3, "   k = kernel     t = Top-processes   . = only busy disks/procs");
+mvwprintw(padwelcome,x+21, 3, "   h = more options                   q = Quit");
+				pnoutrefresh(padwelcome, 0,0,x,1,LINES-2,COLS-2);
+				wnoutrefresh(stdscr);
 				x = x + 22;
 			}
 		} else {
@@ -4492,7 +4532,7 @@ mvprintw(x+21, 3, "   h = more options                   q = Quit");
 			DISPLAY(padhelp,20);
 
 		}
-/*
+/* for debugging use only
 		if(error_on && errorstr[0] != 0) {
 			mvprintw(x, 0, "Error: %s  ",errorstr);
 			x = x + 1;
@@ -6000,7 +6040,7 @@ fprintf(fp,"VM,Paging and Virtual Memory,nr_dirty,nr_writeback,nr_unstable,nr_pa
 					disk_first_time=0;
 					mvwprintw(paddg, 1, 1, "Please wait - collecting disk data");
 				} else {
-					mvwprintw(paddg, 1, 1, "Name          Disks AvgBusy Read|Write-KB/s  TotalMB/s   xfers/s BlockSizeKB");
+					mvwprintw(paddg, 1, 1, "Name          Disks AvgBusy Read-KB/s|Write  TotalMB/s   xfers/s BlockSizeKB");
 					total_busy   = 0.0;
 					total_rbytes = 0.0;
 					total_wbytes = 0.0;
@@ -6266,28 +6306,28 @@ fprintf(fp,"VM,Paging and Virtual Memory,nr_dirty,nr_writeback,nr_unstable,nr_pa
 							}
 						}
 						fprintf(fp, "\n");
-#ifdef EXPERIMENTAL
-						fprintf(fp,"DGF11,%s", LOOP);
+						fprintf(fp,"DGBACKLOG,%s", LOOP);
 						for (k = 0; k < dgroup_total_groups; k++) {
 							if (dgroup_name[k] != 0) {
 								disk_total = 0.0;
 								for (j = 0; j < dgroup_disks[k]; j++) {
 									i = dgroup_data[k*DGROUPITEMS+j];
 									if (i != -1) {
-										disk_total  += DKDELTA(dk_11);
+										disk_total  += DKDELTA(dk_backlog);
 									}
 								}
 								fprintf(fp,",%.1f", disk_total);
 							}
 						}
 						fprintf(fp, "\n");
-#endif /*EXPERIMENTAL*/
 					} /* if( extended_disk == 1 && disk_mode == DISK_MODE_DISKSTATS */
 				}	/* if (dgroup_loaded == 2) */
 			}	/* else from if(cursed) */
 		}	/* 		if ((show_dgroup || (!cursed && dgroup_loaded)))  */
 
 		if (show_top) {
+			wmove(padtop,1, 1);
+			wclrtobot(padtop);
 			/* Get the details of the running processes */
 			skipped = 0;
 			n = getprocs(0);
@@ -6313,6 +6353,8 @@ fprintf(fp,"VM,Paging and Virtual Memory,nr_dirty,nr_writeback,nr_unstable,nr_pa
 					topper[max_sorted].time =  TIMEDELTA(pi_utime,i,j) + 
 								   TIMEDELTA(pi_stime,i,j);
 					topper[max_sorted].size =  p->procs[i].statm_resident;
+					if(isroot)
+					    topper[max_sorted].io =  COUNTDELTA(read_io) + COUNTDELTA(write_io);
 
 					max_sorted++;
 					break;
@@ -6325,13 +6367,15 @@ fprintf(fp,"VM,Paging and Virtual Memory,nr_dirty,nr_writeback,nr_unstable,nr_pa
 				break;
 			case 4: qsort((void *) & topper[0], max_sorted, sizeof(struct topper ), &size_compare );
 				break;
-#ifdef DISK
 			case 5: qsort((void *) & topper[0], max_sorted, sizeof(struct topper ), &disk_compare );
 				break;
-#endif /* DISK */
 			}
 			CURSE BANNER(padtop,"Top Processes");
+			if(isroot) {
 			CURSE mvwprintw(padtop,0, 15, "Procs=%d mode=%d (1=Basic, 3=Perf 4=Size 5=I/O)", n, show_topmode);
+			} else {
+			CURSE mvwprintw(padtop,0, 15, "Procs=%d mode=%d (1=Basic, 3=Perf 4=Size 5=(root-only))", n, show_topmode);
+			}
 			if(cursed && top_first_time) {
 				top_first_time = 0;
 				mvwprintw(padtop,1, 1, "Please wait - information being collected");
@@ -6369,21 +6413,34 @@ fprintf(fp,"VM,Paging and Virtual Memory,nr_dirty,nr_writeback,nr_unstable,nr_pa
 			case 4:
 			case 5:
 
-				if(show_args == ARGS_ONLY) 
+				if(show_args == ARGS_ONLY)  {
 					formatstring = "  PID    %%CPU ResSize    Command                                            ";
-
-				else if(COLS > 119)
-					formatstring = "  PID       %%CPU    Size     Res    Res     Res     Res    Shared    Faults  Command";
-				else
-					formatstring = "  PID    %%CPU  Size   Res   Res   Res   Res Shared   Faults Command";
+				} else if(COLS > 119) {
+					if(show_topmode == 5)
+					formatstring = "  PID       %%CPU    Size     Res    Res     Res     Res    Shared   StorageKB Command";
+					else
+					formatstring = "  PID       %%CPU    Size     Res    Res     Res     Res    Shared    Faults   Command";
+				} else {
+					if(show_topmode == 5)
+					formatstring = "  PID    %%CPU  Size   Res   Res   Res   Res Shared StorageKB Command";
+					else
+					formatstring = "  PID    %%CPU  Size   Res   Res   Res   Res Shared   Faults  Command";
+				}
 				CURSE mvwprintw(padtop,1, y, formatstring);
 
-				if(show_args == ARGS_ONLY)
+				if(show_args == ARGS_ONLY) {
 					formatstring = "         Used      KB                                                        ";
-				else if(COLS > 119)
+				} else if(COLS > 119) {
+					if(show_topmode == 5)
+					formatstring = "            Used      KB     Set    Text    Data     Lib    KB    Read Write";
+					else
 					formatstring = "            Used      KB     Set    Text    Data     Lib    KB     Min   Maj";
-				else
+				} else {
+					if(show_topmode == 5)
+					formatstring = "         Used    KB   Set  Text  Data   Lib    KB ReadWrite ";
+					else
 					formatstring = "         Used    KB   Set  Text  Data   Lib    KB  Min  Maj ";
+				}
 				CURSE mvwprintw(padtop,2, 1, formatstring);
 				for (j = 0; j < max_sorted; j++) {
 					i = topper[j].index;
@@ -6395,7 +6452,7 @@ fprintf(fp,"VM,Paging and Virtual Memory,nr_dirty,nr_writeback,nr_unstable,nr_pa
 							break;
 					}
 					if(cursed) {
-					    if( x + j + 3 - skipped > LINES+2) /* +2 to for safety :-) */
+					    if( x + j + 3 - skipped > LINES+2) /* +2 to for safety :-) XYZXYZ*/
 						break;
 					    if(cmdfound && !cmdcheck(p->procs[i].pi_comm)) {
 						skipped++;
@@ -6415,6 +6472,7 @@ fprintf(fp,"VM,Paging and Virtual Memory,nr_dirty,nr_writeback,nr_unstable,nr_pa
 					    formatstring = "%8d %7.1f %7lu %7lu %7lu %7lu %7lu %5lu %6d %6d %-32s";
 					else
 					    formatstring = "%7d %5.1f %5lu %5lu %5lu %5lu %5lu %5lu %4d %4d %-32s";
+
 					    mvwprintw(padtop,j + 3 - skipped, 1, formatstring,
 					    p->procs[i].pi_pid,
 					    topper[j].time/elapsed,
@@ -6425,8 +6483,8 @@ fprintf(fp,"VM,Paging and Virtual Memory,nr_dirty,nr_writeback,nr_unstable,nr_pa
 					    p->procs[i].statm_drs*pagesize/1024UL, /* in KB */
 					    p->procs[i].statm_lrs*pagesize/1024UL, /* in KB */
 					    p->procs[i].statm_share*pagesize/1024UL, /* in KB */
-					    (int)(COUNTDELTA(pi_minflt) / elapsed),
-					    (int)(COUNTDELTA(pi_majflt) / elapsed),
+					    show_topmode == 5 ? (int)(COUNTDELTA(read_io)  / elapsed / 1024) : (int)(COUNTDELTA(pi_minflt) / elapsed),
+					    show_topmode == 5 ? (int)(COUNTDELTA(write_io) / elapsed / 1024) : (int)(COUNTDELTA(pi_majflt) / elapsed),
 					    p->procs[i].pi_comm);
 					  }
 					}
@@ -6472,7 +6530,7 @@ fprintf(fp,"VM,Paging and Virtual Memory,nr_dirty,nr_writeback,nr_unstable,nr_pa
 				break;
 			    }
 			}
-			CURSE DISPLAY(padtop,j + 3);
+			DISPLAY(padtop,3 + j);
 		}
 
 		if(cursed) {
@@ -6482,7 +6540,9 @@ fprintf(fp,"VM,Paging and Virtual Memory,nr_dirty,nr_writeback,nr_unstable,nr_pa
 				DISPLAY(padverb,4);
 				x=y;
 			}
-			if(x<LINES-2)mvwhline(stdscr, x, 1, ACS_HLINE,COLS-2);
+			/* underline the end of the stats area border */
+			if(x < LINES-2)mvwhline(stdscr, x, 1, ACS_HLINE,COLS-2);
+
 			wmove(stdscr,0, 0);
 			wrefresh(stdscr);
 			doupdate();
@@ -6492,10 +6552,39 @@ fprintf(fp,"VM,Paging and Virtual Memory,nr_dirty,nr_writeback,nr_unstable,nr_pa
 				if (checkinput())
 					break;
 			}
+			if(x<LINES-2) mvwhline(stdscr, x, 1, ' ', COLS-2);
+			if(first_key_pressed == 0){
+				first_key_pressed=1;
+				wmove(stdscr,0, 0);
+				wclear(stdscr);
+				wmove(stdscr,0,0);
+				wclrtobot(stdscr);
+				wrefresh(stdscr);
+				doupdate();
+			}
+
 		}
 		else {
 			fflush(NULL);
-			secs = seconds; 
+
+			gettimeofday(&nmon_tv, 0);
+			nmon_end_time = (double)nmon_tv.tv_sec + (double)nmon_tv.tv_usec * 1.0e-6;
+			if(nmon_run_time  < 0.0){
+				nmon_start_time = nmon_end_time;
+				nmon_run_time = 0.0;
+			}
+			nmon_run_time += (nmon_end_time - nmon_start_time);
+			if(nmon_run_time < 1.0) {
+				secs = seconds;  /* sleep for the requested number of seconds */
+			}
+			else {
+				seconds_over = (int)nmon_run_time; /* reduce the sleep time by whole number of seconds */
+				secs = seconds - seconds_over;
+				nmon_run_time -= (double)seconds_over;
+			}
+			if(secs < 1) /* sanity check in case CPUs are flat out and nmon taking far to long to complete */
+				secs = 1;
+
 redo:
 			errno = 0;
 			ret = sleep(secs); 
@@ -6505,6 +6594,8 @@ redo:
 				secs=ret;
 				goto redo;
 			}
+			gettimeofday(&nmon_tv, 0);
+			nmon_start_time = (double)nmon_tv.tv_sec + (double)nmon_tv.tv_usec * 1.0e-6;
 		}
 
 		switcher();
