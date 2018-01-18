@@ -23,7 +23,7 @@ nmon: lnmon.o
 #define RAW(member)      (long)((long)(p->cpuN[i].member)   - (long)(q->cpuN[i].member))
 #define RAWTOTAL(member) (long)((long)(p->cpu_total.member) - (long)(q->cpu_total.member)) 
 
-#define VERSION "15c" 
+#define VERSION "15e" 
 char version[] = VERSION;
 static char *SccsId = "nmon " VERSION;
 
@@ -4128,17 +4128,17 @@ printf("TIMESTAMP=%d.\n",time_stamp_type);
 */
 
 
-		fprintf(fp,"NET,Network I/O %s,", run_name);
+		fprintf(fp,"NET,Network I/O %s", run_name);
 		for (i = 0; i < networks; i++)
-			fprintf(fp,"%-2s-read-KB/s,", (char *)p->ifnets[i].if_name);
+			fprintf(fp,",%-2s-read-KB/s", (char *)p->ifnets[i].if_name);
 		for (i = 0; i < networks; i++)
-			fprintf(fp,"%-2s-write-KB/s,", (char *)p->ifnets[i].if_name);
+			fprintf(fp,",%-2s-write-KB/s", (char *)p->ifnets[i].if_name);
 		fprintf(fp,"\n");
-		fprintf(fp,"NETPACKET,Network Packets %s,", run_name);
+		fprintf(fp,"NETPACKET,Network Packets %s", run_name);
 		for (i = 0; i < networks; i++)
-			fprintf(fp,"%-2s-read/s,", (char *)p->ifnets[i].if_name);
+			fprintf(fp,",%-2s-read/s,", (char *)p->ifnets[i].if_name);
 		for (i = 0; i < networks; i++)
-			fprintf(fp,"%-2s-write/s,", (char *)p->ifnets[i].if_name);
+			fprintf(fp,",%-2s-write/s,", (char *)p->ifnets[i].if_name);
 		/* iremoved as it is not below in the BUSY line fprintf(fp,"\n"); */
 #ifdef DEBUG
 		if(debug)printf("disks=%d x%sx\n",(char *)disks,p->dk[0].dk_name);
@@ -4188,8 +4188,8 @@ printf("TIMESTAMP=%d.\n",time_stamp_type);
 		for (k = 0; k < jfses; k++) {
   		    if(jfs[k].mounted && strncmp(jfs[k].name,"/proc",5)
   		    			&& strncmp(jfs[k].name,"/sys",4)
-  		    			&& strncmp(jfs[k].name,"/dev/pts",8)
-					&& strncmp(jfs[k].name,"/dev/shm",8)
+					&& strncmp(jfs[k].name,"/run/",5)
+					&& strncmp(jfs[k].name,"/dev/",5)
 					&& strncmp(jfs[k].name,"/var/lib/nfs/rpc",16)
 			)  /* /proc gives invalid/insane values */
 			fprintf(fp,",%s", jfs[k].name); 
@@ -5503,20 +5503,20 @@ fprintf(fp,"VM,Paging and Virtual Memory,nr_dirty,nr_writeback,nr_unstable,nr_pa
 			}
 			DISPLAY(padnet,networks + 2);
 			if (!cursed) {
-				fprintf(fp,show_rrd ? "rrdtool update net.rrd %s" : "NET,%s,", LOOP);
+				fprintf(fp,show_rrd ? "rrdtool update net.rrd %s" : "NET,%s", LOOP);
 				for (i = 0; i < networks; i++) {
-					fprintf(fp,show_rrd ? ":%.1f" : "%.1f,", IFDELTA(if_ibytes) / 1024.0);
+					fprintf(fp,show_rrd ? ":%.1f" : ",%.1f", IFDELTA(if_ibytes) / 1024.0);
 				}
 				for (i = 0; i < networks; i++) {
-					fprintf(fp,show_rrd ? ":%.1f" : "%.1f,", IFDELTA(if_obytes) / 1024.0);
+					fprintf(fp,show_rrd ? ":%.1f" : ",%.1f", IFDELTA(if_obytes) / 1024.0);
 				}
 				fprintf(fp,"\n");
-				fprintf(fp,show_rrd ? "rrdtool update netpacket.rrd %s" : "NETPACKET,%s,", LOOP);
+				fprintf(fp,show_rrd ? "rrdtool update netpacket.rrd %s" : "NETPACKET,%s", LOOP);
 				for (i = 0; i < networks; i++) {
-					fprintf(fp,show_rrd ? ":%.1f" : "%.1f,", IFDELTA(if_ipackets) );
+					fprintf(fp,show_rrd ? ":%.1f" : ",%.1f", IFDELTA(if_ipackets) );
 				}
 				for (i = 0; i < networks; i++) {
-					fprintf(fp,show_rrd ? ":%.1f" : "%.1f,", IFDELTA(if_opackets) );
+					fprintf(fp,show_rrd ? ":%.1f" : ",%.1f", IFDELTA(if_opackets) );
 				}
 				fprintf(fp,"\n");
 			}
@@ -5587,10 +5587,10 @@ fprintf(fp,"VM,Paging and Virtual Memory,nr_dirty,nr_writeback,nr_unstable,nr_pa
 						fs_bsize = 4.0 * 1024.0;
 					else
 						fs_bsize = statfs_buffer.f_bsize;
-					/* convery blocks to MB */
+					/* convert blocks to MB */
 					fs_size = (float)statfs_buffer.f_blocks * fs_bsize/1024.0/1024.0;
 
-					/* fine the best size info available f_bavail is like df reports
+					/* find the best size info available f_bavail is like df reports
 					   otherwise use f_bsize (this includes inode blocks) */
 					if(statfs_buffer.f_bavail == 0) 
 						fs_free = (float)statfs_buffer.f_bfree  * fs_bsize/1024.0/1024.0;
@@ -5600,7 +5600,7 @@ fprintf(fp,"VM,Paging and Virtual Memory,nr_dirty,nr_writeback,nr_unstable,nr_pa
 					/* this is a percentage */
 					fs_size_used = (fs_size - (float)statfs_buffer.f_bfree  * fs_bsize/1024.0/1024.0)/fs_size * 100.0;
 					/* try to get the same number as df using kludge */
-					fs_size_used += 1.0;
+					/*fs_size_used += 1.0; */
 					if (fs_size_used >100.0)
 						fs_size_used = 100.0;
 
@@ -5613,7 +5613,7 @@ fprintf(fp,"VM,Paging and Virtual Memory,nr_dirty,nr_writeback,nr_unstable,nr_pa
 					str_p,
 					fs_size,
 					fs_free,
-					fs_size_used,
+					ceil(fs_size_used),
 					jfs[k].type,
 					jfs[k].name
 					);
@@ -5640,14 +5640,37 @@ fprintf(fp,"VM,Paging and Virtual Memory,nr_dirty,nr_writeback,nr_unstable,nr_pa
 			for (k = 0; k < jfses; k++) {
 			    if(jfs[k].mounted && strncmp(jfs[k].name,"/proc",5)
 						&& strncmp(jfs[k].name,"/sys",4)
-						&& strncmp(jfs[k].name,"/dev/pts",8)
-						&& strncmp(jfs[k].name,"/dev/shm",8)
+						&& strncmp(jfs[k].name,"/dev/",5)
+						&& strncmp(jfs[k].name,"/run/",5)
 						&& strncmp(jfs[k].name,"/var/lib/nfs/rpc",16)
 				)   { /* /proc gives invalid/insane values */
 					    if(fstatfs( jfs[k].fd, &statfs_buffer) != -1) {
-					fprintf(fp, show_rrd ? ":%.1f" : ",%.1f",
-					((float)statfs_buffer.f_blocks - (float)statfs_buffer.f_bfree)/(float)statfs_buffer.f_blocks*100.0);
-				    }
+						if(statfs_buffer.f_bsize == 0) 
+							fs_bsize = 4.0 * 1024.0;
+						else
+							fs_bsize = statfs_buffer.f_bsize;
+						/* convert blocks to MB */
+						fs_size = (float)statfs_buffer.f_blocks * fs_bsize/1024.0/1024.0;
+
+						/* find the best size info available f_bavail is like df reports
+						   otherwise use f_bsize (this includes inode blocks) */
+						if(statfs_buffer.f_bavail == 0) 
+							fs_free = (float)statfs_buffer.f_bfree  * fs_bsize/1024.0/1024.0;
+						else
+							fs_free = (float)statfs_buffer.f_bavail  * fs_bsize/1024.0/1024.0;
+
+
+
+						if(fs_size <= 0.0 || fs_bsize <= 0.0) /* some pseudo filesystems have zero size but we get a -nan result */
+						fs_size_used = 0.0;
+						else
+						fs_size_used = (fs_size - (float)statfs_buffer.f_bfree  * fs_bsize/1024.0/1024.0)/fs_size * 100.0;
+
+						if (fs_size_used >100.0)
+							fs_size_used = 100.0;
+
+						fprintf(fp, show_rrd ? ":%.1f" : ",%.1f", fs_size_used );
+					    }
 				    else
 					fprintf(fp, show_rrd? ":U" : ",0.0");
 				}
