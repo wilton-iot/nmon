@@ -23,7 +23,7 @@ nmon: lnmon.o
 #define RAW(member)      (long)((long)(p->cpuN[i].member)   - (long)(q->cpuN[i].member))
 #define RAWTOTAL(member) (long)((long)(p->cpu_total.member) - (long)(q->cpu_total.member)) 
 
-#define VERSION "14g" 
+#define VERSION "14i" 
 char version[] = VERSION;
 static char *SccsId = "nmon " VERSION;
 
@@ -131,18 +131,12 @@ void error(char *err)
 	strncpy(errorstr,err,69);
 }
 
+/* Maximum number of lines in /proc files */
+/* Intel already has 26 (so here 30) per Hypterthread CPU (max 128*2 CPUs here) */
+/* POWER has only 6 to 7 lines but gets  1536 SMT threads soon */
+/* Erring on the saf side below */
+#define PROC_MAXLINES (16*1024)
 
-/* Default size for smaller files */
-#define PROC_MAXBUF   (1024*4)
-
-/* /proc/stat size for 50-ish bytes per CPU */
-#define STAT_MAXBUF   (1024*64)
-
-/* /proc/cpuinfo can be 512 bytes per CPU and we allow 256 CPUs */
-/* and 20 lines per CPU so boost the buffers for this one */
-#define CPUINFO_MAXBUF (512*256)
-
-#define PROC_MAXLINES (20*256*sizeof(char *))
 
 int proc_cpu_done = 0;	/* Flag if we have run function proc_cpu() already in this interval */
 
@@ -150,6 +144,7 @@ int reread =0;
 struct {
 	FILE *fp;
 	char *filename;
+	int size;
 	int lines;
 	char *line[PROC_MAXLINES];
 	char *buf;
@@ -158,19 +153,6 @@ struct {
 
 void proc_init()
 {
-int i;
-	/* Initialise the file pointers */
-	for(i=0;i<P_NUMBER;i++) {
-		proc[i].fp = 0;
-		proc[i].read_this_interval = 0;
-
-		if(i == P_CPUINFO)
-			proc[i].buf  = (char *)malloc(CPUINFO_MAXBUF);
-		else if(i == P_STAT)
-			proc[i].buf  = (char *)malloc(STAT_MAXBUF);
-		else
-			proc[i].buf  = (char *)malloc(PROC_MAXBUF);
-	}
 	proc[P_CPUINFO].filename = "/proc/cpuinfo";
 	proc[P_STAT].filename    = "/proc/stat";
 	proc[P_VERSION].filename = "/proc/version";
@@ -188,7 +170,6 @@ int i;
 int size;
 int found;
 char buf[1024];
-int bytes;
 
 	if(proc[num].read_this_interval == 1 )
 		return;
@@ -207,14 +188,20 @@ int bytes;
 	if( num == P_STAT)
 		proc_cpu_done = 0;
 
-	if(num == P_CPUINFO)
-		bytes = CPUINFO_MAXBUF -1;
-	else if(num == P_STAT)
-		bytes = STAT_MAXBUF -1;
-	else
-		bytes = PROC_MAXBUF -1;
-
-	size = fread(proc[num].buf, 1, bytes, proc[num].fp);
+	if(proc[num].size == 0) {
+		/* first time so allocate  initial now */
+		proc[num].buf = malloc(512);
+		proc[num].size = 512;
+	}
+	
+	for(i=0;i<2048;i++) {
+		size = fread(proc[num].buf, 1, proc[num].size-1, proc[num].fp);
+		if(size < proc[num].size -1)
+			break;
+		proc[num].size +=512;
+		proc[num].buf = realloc(proc[num].buf,proc[num].size);
+		rewind(proc[num].fp);
+	}
 
 	proc[num].buf[size]=0;
 	proc[num].lines=0;
@@ -340,6 +327,16 @@ time_t  timer;			/* used to work out the hour/min/second */
 
 /* Counts of resources */
 int	cpus = 1;  	/* number of CPUs in system (lets hope its more than zero!) */
+#ifdef X86
+int   cores          = 0;
+int   siblings       = 0;
+int   processorchips = 0;
+int   hyperthreads   = 0;
+char *vendor_ptr = "-";
+char *model_ptr  = "-";
+char *mhz_ptr    = "-";
+char *bogo_ptr   = "-";
+#endif
 int old_cpus = 1;	/* Number of CPU seen in previuos interval */
 int	max_cpus = 1;  	/* highest number of CPUs in DLPAR */
 int	networks = 0;  	/* number of networks in system  */
@@ -1266,8 +1263,71 @@ void get_cpu_cnt()	{
                     cpus=i;
             else
                     break;
-    }
+    	}
 }
+#ifdef X86
+void get_intel_spec() {
+int i;
+int physicalcpu[256];
+int id;
+
+	/* Get CPU info from /proc/stat and populate proc[P_STAT] */
+	proc_read(P_CPUINFO);
+
+	for(i=0; i<256;i++)
+		physicalcpu[i]=0;
+
+	for(i=0; i<proc[P_CPUINFO].lines; i++) {
+		if(strncmp("vendor_id",proc[P_CPUINFO].line[i],9) == 0) {
+			vendor_ptr = &proc[P_CPUINFO].line[i][12];
+		}
+	}
+	for(i=0; i<proc[P_CPUINFO].lines; i++) {
+		if(strncmp("model name",proc[P_CPUINFO].line[i],10) == 0) {
+			model_ptr = &proc[P_CPUINFO].line[i][13];
+		}
+	}
+	for(i=0; i<proc[P_CPUINFO].lines; i++) {
+		if(strncmp("cpu MHz",proc[P_CPUINFO].line[i],7) == 0) {
+			mhz_ptr = &proc[P_CPUINFO].line[i][11];
+		}
+	}
+	for(i=0; i<proc[P_CPUINFO].lines; i++) {
+		if(strncmp("bogomips",proc[P_CPUINFO].line[i],8) == 0) {
+			bogo_ptr = &proc[P_CPUINFO].line[i][11];
+		}
+	}
+
+	for(i=0; i<proc[P_CPUINFO].lines; i++) {
+		if(strncmp("physical id",proc[P_CPUINFO].line[i],11) == 0) {
+			id = atoi(&proc[P_CPUINFO].line[i][15]);
+			if(id<256)
+			physicalcpu[id] = 1;
+		}
+	}
+	for(i=0; i<256;i++)
+		if(physicalcpu[i] == 1)
+			processorchips++;
+
+	/* Start with index [1] as [0] contains overall CPU statistics */
+	for(i=0; i<proc[P_CPUINFO].lines; i++) {
+		if(strncmp("siblings",proc[P_CPUINFO].line[i],8) == 0) {
+			siblings = atoi(&proc[P_CPUINFO].line[i][11]);
+			break;
+		}
+	}
+	for(i=0; i<proc[P_CPUINFO].lines; i++) {
+		if(strncmp("cpu cores",proc[P_CPUINFO].line[i],9) == 0) {
+			cores = atoi(&proc[P_CPUINFO].line[i][12]);
+			break;
+		}
+	}
+	if(siblings>cores) 
+		hyperthreads=siblings/cores;
+	else
+		hyperthreads=0;
+}
+#endif
 
 int stat8 = 0; /* used to determine the number of variables on a line */
 
@@ -1446,6 +1506,7 @@ void proc_nfs()
 int i;
 int j;
 int len;
+int lineno;
 
 /* sample /proc/net/rpc/nfs
 net 0 0 0 0
@@ -1455,31 +1516,39 @@ proc3 22 0 27364 0 32 828 22 40668 0 1 0 0 0 0 0 0 0 0 1212 6 2 1 0
 proc4 35 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
 */
     if(proc[P_NFS].fp != 0) {
-	/* client version 2 line readers "proc2 18 num num etc" */
-	len=strlen(proc[P_NFS].line[2]);
-	for(j=0,i=8;i<len && j<18;i++) {
-		if(proc[P_NFS].line[2][i] == ' ') {
-			p->nfs.v2c[j] =atol(&proc[P_NFS].line[2][i+1]);
-			nfs_v2c_found=1;
-			j++;
+	for(lineno=0;lineno<proc[P_NFS].lines;lineno++) {
+		if(!strncmp("proc2 ",proc[P_NFS].line[lineno],6)) {
+			/* client version 2 line readers "proc2 18 num num etc" */
+			len=strlen(proc[P_NFS].line[lineno]);
+			for(j=0,i=8;i<len && j<18;i++) {
+				if(proc[P_NFS].line[lineno][i] == ' ') {
+					p->nfs.v2c[j] =atol(&proc[P_NFS].line[lineno][i+1]);
+					nfs_v2c_found=1;
+					j++;
+				}
+			}
 		}
-	}
-	/* client version 3 line readers "proc3 22 num num etc" */
-	len=strlen(proc[P_NFS].line[3]);
-	for(j=0,i=8;i<len && j<22;i++) {
-		if(proc[P_NFS].line[3][i] == ' ') {
-			p->nfs.v3c[j] =atol(&proc[P_NFS].line[3][i+1]);
-			nfs_v3c_found=1;
-			j++;
+		if(!strncmp("proc3 ",proc[P_NFS].line[lineno],6)) {
+			/* client version 3 line readers "proc3 22 num num etc" */
+			len=strlen(proc[P_NFS].line[lineno]);
+			for(j=0,i=8;i<len && j<22;i++) {
+				if(proc[P_NFS].line[lineno][i] == ' ') {
+					p->nfs.v3c[j] =atol(&proc[P_NFS].line[lineno][i+1]);
+					nfs_v3c_found=1;
+					j++;
+				}
+			}
 		}
-	}
-	/* client version 4 line readers "proc4 35 num num etc" */
-	len=strlen(proc[P_NFS].line[4]);
-	for(j=0,i=8;i<len && j<35;i++) {
-		if(proc[P_NFS].line[4][i] == ' ') {
-			p->nfs.v4c[j] =atol(&proc[P_NFS].line[4][i+1]);
-			nfs_v4c_found=1;
-			j++;
+		if(!strncmp("proc4 ",proc[P_NFS].line[lineno],6)) {
+			/* client version 4 line readers "proc4 35 num num etc" */
+			len=strlen(proc[P_NFS].line[lineno]);
+			for(j=0,i=8;i<len && j<35;i++) {
+				if(proc[P_NFS].line[lineno][i] == ' ') {
+					p->nfs.v4c[j] =atol(&proc[P_NFS].line[lineno][i+1]);
+					nfs_v4c_found=1;
+					j++;
+				}
+			}
 		}
 	}
     }
@@ -1497,33 +1566,41 @@ proc4 2 0 0
 proc4ops 40 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
 */
     if(proc[P_NFSD].fp != 0) {
-	/* server version 2 line readers "proc2 18 num num etc" */
-	len=strlen(proc[P_NFSD].line[7]);
-	for(j=0,i=8;i<len && j<18;i++) {
-		if(proc[P_NFSD].line[2][i] == ' ') {
-			p->nfs.v2s[j] =atol(&proc[P_NFSD].line[7][i+1]);
-			nfs_v2s_found=1;
-			j++;
-		}
-	}
-	/* server version 3 line readers "proc3 22 num num etc" */
-	len=strlen(proc[P_NFSD].line[8]);
-	for(j=0,i=8;i<len && j<22;i++) {
-		if(proc[P_NFS].line[3][i] == ' ') {
-			p->nfs.v3s[j] =atol(&proc[P_NFSD].line[8][i+1]);
-			nfs_v3s_found=1;
-			j++;
-		}
-	}
-	/* server version 4 line readers "proc4ops 40 num num etc"  NOTE: the "ops" hence starting in column 11 */ 
-	len=strlen(proc[P_NFSD].line[10]);
-	for(j=0,i=11;i<len && j<40;i++) {
-		if(proc[P_NFS].line[3][i] == ' ') {
-			p->nfs.v4s[j] =atol(&proc[P_NFSD].line[10][i+1]);
-			nfs_v4s_found=1;
-			j++;
-		}
-	}
+		for(lineno=0;lineno<proc[P_NFSD].lines;lineno++) {
+			if(!strncmp("proc2 ",proc[P_NFSD].line[lineno],6)) {
+				/* server version 2 line readers "proc2 18 num num etc" */
+				len=strlen(proc[P_NFSD].line[lineno]);
+				for(j=0,i=8;i<len && j<18;i++) {
+					if(proc[P_NFSD].line[lineno][i] == ' ') {
+						p->nfs.v2s[j] =atol(&proc[P_NFSD].line[lineno][i+1]);
+						nfs_v2s_found=1;
+						j++;
+					}
+				}
+			}
+			if(!strncmp("proc3 ",proc[P_NFSD].line[lineno],6)) {
+				/* server version 3 line readers "proc3 22 num num etc" */
+				len=strlen(proc[P_NFSD].line[lineno]);
+				for(j=0,i=8;i<len && j<22;i++) {
+					if(proc[P_NFSD].line[lineno][i] == ' ') {
+						p->nfs.v3s[j] =atol(&proc[P_NFSD].line[lineno][i+1]);
+						nfs_v3s_found=1;
+						j++;
+					}
+				}
+			}
+			if(!strncmp("proc4ops ",proc[P_NFSD].line[lineno],9)) {
+				/* server version 4 line readers "proc4ops 40 num num etc"  NOTE: the "ops" hence starting in column 11 */ 
+				len=strlen(proc[P_NFSD].line[lineno]);
+				for(j=0,i=11;i<len && j<40;i++) {
+					if(proc[P_NFSD].line[lineno][i] == ' ') {
+						p->nfs.v4s[j] =atol(&proc[P_NFSD].line[lineno][i+1]);
+						nfs_v4s_found=1;
+						j++;
+					}
+				}
+			}
+	    }
     }
 }
 
@@ -2082,11 +2159,17 @@ void plot_smp(WINDOW *pad, int cpu_no, int row, double user, double kernel, doub
 			wprintw(pad,"W");
 			COLOUR wattrset(pad,COLOR_PAIR(0));
 		}
-		for (i = 0; i < (int)(idle   / 2); i++)
-			wprintw(pad," ");
+		for (i = 0; i < (int)(idle   / 2); i++) {
+#ifdef POWER
+			if( lparcfg.smt_mode > 1 && ((cpu_no -1) % lparcfg.smt_mode) == 0 && (i % 2)) 
+				wprintw(pad,".");
+			else
+#endif
+				wprintw(pad," ");
+		}
 		mvwprintw(pad,row, 77, "|");
 		
-		peak_col = 29 +(int)(cpu_peak[cpu_no]/2);
+		peak_col = 28 +(int)(cpu_peak[cpu_no]/2);
 		if(peak_col > 77)
 			peak_col=77;
 		mvwprintw(pad,row, peak_col, ">");
@@ -2378,6 +2461,8 @@ void list_dgroup(struct dsk_stat *dk)
 		fprintf(fp, "\n");
 	   }
 	*/
+	if( !show_dgroup) return;
+
 	for (n = 0, i = 0; i < dgroup_total_groups; i++) {
 		if (first) {
 			fprintf(fp, "BBBG,%03d,User Defined Disk Groups Name,Disks\n", n++);
@@ -3417,7 +3502,6 @@ int main(int argc, char **argv)
 #endif /* POWER */
 	int	smp_first_time =1;
 	int	proc_first_time =1;
-	pid_t	firstproc = (pid_t)0;
 	pid_t childpid = -1;
 	int ralfmode = 0;
 	char	pgrp[32];
@@ -3455,7 +3539,6 @@ int main(int argc, char **argv)
 	float fs_free;
 	float fs_size_used;
 	char cmdstr[256];
-	int disk_stats_read = 0;
 	int updays, uphours, upmins;
 	float v2c_total;
 	float v2s_total;
@@ -3463,13 +3546,11 @@ int main(int argc, char **argv)
 	float v3s_total;
 	float v4c_total;
 	float v4s_total;
-	int room =1;
 	int errors=0;
 	WINDOW * padmem = NULL;
 	WINDOW * padlarge = NULL;
 	WINDOW * padpage = NULL;
 	WINDOW * padker = NULL;
-	WINDOW * padres = NULL;
 	WINDOW * padnet = NULL;
 	WINDOW * padneterr = NULL;
 	WINDOW * padnfs = NULL;
@@ -3481,7 +3562,9 @@ int main(int argc, char **argv)
 	WINDOW * padmap = NULL;
 	WINDOW * padtop = NULL;
 	WINDOW * padjfs = NULL;
+#ifdef POWER
 	WINDOW * padlpar = NULL;
+#endif
 	WINDOW * padverb = NULL;
 	WINDOW * padhelp = NULL;
 
@@ -3515,7 +3598,6 @@ int main(int argc, char **argv)
                                 pnoutrefresh(pad, 0,0,x,1,x+rows+1,COLS-2); \
                         x=x+(rows);     \
                         if(x+4>LINES) { \
-                                room=0; \
                                 mvwprintw(stdscr,LINES-1,10,"Warning: Some Statistics may not shown"); \
                         }               \
                        }
@@ -3734,7 +3816,9 @@ printf("TIMESTAMP=%d.\n",time_stamp_type);
 	/* Determine number of active LOGICAL cpu - depends on SMT mode ! */
 	get_cpu_cnt();
 	max_cpus=old_cpus=cpus;
-
+#ifdef X86
+	get_intel_spec();
+#endif
 	proc_read(P_STAT);
 	proc_cpu();
 	proc_read(P_UPTIME);
@@ -3815,7 +3899,9 @@ printf("TIMESTAMP=%d.\n",time_stamp_type);
         	COLOUR start_color();
                 COLOUR init_pairs();
 		clear();
+#ifdef POWER
 		padlpar = newpad(11,MAXCOLS);
+#endif
 		padmap = newpad(24,MAXCOLS);
 		padhelp = newpad(24,MAXCOLS);
 		padmem = newpad(20,MAXCOLS);
@@ -3831,7 +3917,6 @@ printf("TIMESTAMP=%d.\n",time_stamp_type);
 		padjfs = newpad(MAXROWS,MAXCOLS);
 		padker = newpad(5,MAXCOLS);
 		padverb = newpad(8,MAXCOLS);
-		padres = newpad(23,MAXCOLS);
 		padnfs = newpad(25,MAXCOLS);
 		padtop = newpad(MAXROWS,MAXCOLS*2);
 
@@ -3903,6 +3988,16 @@ printf("TIMESTAMP=%d.\n",time_stamp_type);
 		fprintf(fp,"AAA,CPU ID length,3\n");	/* Give analyzer a chance to easily find length of CPU number - 3 digits here! */
 #else
 		fprintf(fp,"AAA,cpus,%d\n", cpus);
+#endif
+#ifdef X86
+		fprintf(fp,"AAA,x86,VendorId,%s\n",       vendor_ptr);
+		fprintf(fp,"AAA,x86,ModelName,%s\n",      model_ptr);
+		fprintf(fp,"AAA,x86,MHz,%s\n",            mhz_ptr);
+		fprintf(fp,"AAA,x86,bogomips,%s\n",       bogo_ptr);
+		fprintf(fp,"AAA,x86,ProcessorChips,%d\n", processorchips);
+		fprintf(fp,"AAA,x86,Cores,%d\n",          cores);
+		fprintf(fp,"AAA,x86,hyperthreads,%d\n",   hyperthreads);
+		fprintf(fp,"AAA,x86,VirtualCPUs,%d\n",    cpus);
 #endif
 		fprintf(fp,"AAA,proc_stat_variables,%d\n", stat8);
 
@@ -4004,7 +4099,7 @@ printf("TIMESTAMP=%d.\n",time_stamp_type);
 		jfs_load(UNLOAD);
 #ifdef POWER
 		if( proc_lparcfg() && lparcfg.shared_processor_mode != 0 ){
-			fprintf(fp,"LPAR,Shared CPU LPAR Stats %s,PhysicalCPU,capped,shared_processor_mode,system_potential_processors,system_active_processors,pool_capacity,MinEntCap,partition_entitled_capacity,partition_max_entitled_capacity,MinProcs,Logical CPU,partition_active_processors,partition_potential_processors,capacity_weight,unallocated_capacity_weight,BoundThrds,MinMem,unallocated_capacity,pool_idle_time\n",hostname);
+			fprintf(fp,"LPAR,Shared CPU LPAR Stats %s,PhysicalCPU,capped,shared_processor_mode,system_potential_processors,system_active_processors,pool_capacity,MinEntCap,partition_entitled_capacity,partition_max_entitled_capacity,MinProcs,Logical CPU,partition_active_processors,partition_potential_processors,capacity_weight,unallocated_capacity_weight,BoundThrds,MinMem,unallocated_capacity,pool_idle_time,smt_mode\n",hostname);
 
 		}
 #endif /*POWER*/
@@ -4030,6 +4125,21 @@ printf("TIMESTAMP=%d.\n",time_stamp_type);
 		linux_bbbp("ppc64_utils - ls-veth",   	"/usr/sbin/ls-veth 2>/dev/null", WARNING);
 		linux_bbbp("ppc64_utils - ls-vscsi",   	"/usr/sbin/ls-vscsi 2>/dev/null", WARNING);
 		linux_bbbp("ppc64_utils - lsmcode",   	"/usr/sbin/lsmcode 2>/dev/null", WARNING);
+		linux_bbbp("ppc64_cpu - smt",   	"/usr/sbin/ppc64_cpu --smt 2>/dev/null", WARNING);
+		linux_bbbp("ppc64_cpu - cores",   	"/usr/sbin/ppc64_cpu --cores-present 2>/dev/null", WARNING);
+		linux_bbbp("ppc64_cpu - DSCR",   	"/usr/sbin/ppc64_cpu --dscr 2>/dev/null", WARNING);
+		linux_bbbp("ppc64_cpu - snooze",   	"/usr/sbin/ppc64_cpu --smt-snooze-delay 2>/dev/null", WARNING);
+		linux_bbbp("ppc64_cpu - run-mode",   	"/usr/sbin/ppc64_cpu --run-mode 2>/dev/null", WARNING);
+		linux_bbbp("ppc64_cpu - frequency",   	"/usr/sbin/ppc64_cpu --frequency 2>/dev/null", WARNING);
+
+		linux_bbbp("bootlist -m nmonal -o",   	"/usr/sbin/bootlist -m normal -o 2>/dev/null", WARNING);
+		linux_bbbp("lsslot",            	"/usr/sbin/lsslot      2>/dev/null", WARNING);
+		linux_bbbp("lparstat -i",            	"/usr/sbin/lparstat -i 2>/dev/null", WARNING);
+		linux_bbbp("lsdevinfo",            	"/usr/sbin/lsdevinfo 2>/dev/null", WARNING);
+		linux_bbbp("ls-vdev",            	"/usr/sbin/ls-vdev  2>/dev/null", WARNING);
+		linux_bbbp("ls-veth",            	"/usr/sbin/ls-veth  2>/dev/null", WARNING);
+		linux_bbbp("ls-vscsi",            	"/usr/sbin/ls-vscsi 2>/dev/null", WARNING);
+
 #endif
 		linux_bbbp("/proc/diskinfo",   "/bin/cat /proc/diskinfo 2>/dev/null", WARNING);
 		linux_bbbp("/proc/diskstats",   "/bin/cat /proc/diskstats 2>/dev/null", WARNING);
@@ -4045,14 +4155,12 @@ printf("TIMESTAMP=%d.\n",time_stamp_type);
 #ifndef KERNEL_2_6_18
 		linux_bbbp("/proc/1/statm",    "/bin/cat /proc/1/statm 2>/dev/null", WARNING);
 #endif
-#ifdef POWER
-		linux_bbbp("/proc/ppc64/lparcfg",    "/bin/cat /proc/ppc64/lparcfg 2>/dev/null", WARNING);
-#endif
 #ifdef MAINFRAME
 		linux_bbbp("/proc/sysinfo",    "/bin/cat /proc/sysinfo 2>/dev/null", WARNING);
 #endif
 		linux_bbbp("/proc/net/rpc/nfs",        "/bin/cat /proc/net/rpc/nfs 2>/dev/null", WARNING);
 		linux_bbbp("/proc/net/rpc/nfsd",        "/bin/cat /proc/net/rpc/nfsd 2>/dev/null", WARNING);
+		linux_bbbp("/proc/modules",    "/bin/cat /proc/modules 2>/dev/null", WARNING);
 		linux_bbbp("ifconfig",        "/sbin/ifconfig 2>/dev/null", WARNING);
 		linux_bbbp("/bin/df-m",        "/bin/df -m 2>/dev/null", WARNING);
 		linux_bbbp("/bin/mount",        "/bin/mount 2>/dev/null", WARNING);
@@ -4061,6 +4169,10 @@ printf("TIMESTAMP=%d.\n",time_stamp_type);
 		linux_bbbp("uptime",    "/usr/bin/uptime  2>/dev/null", WARNING);
 		linux_bbbp("getconf PAGESIZE",    "/usr/bin/getconf PAGESIZE  2>/dev/null", WARNING);
 
+#ifdef POWER
+		linux_bbbp("/proc/ppc64/lparcfg",    "/bin/cat /proc/ppc64/lparcfg 2>/dev/null", WARNING);
+		linux_bbbp("lscfg-v",    "/usr/sbin/lscfg -v 2>/dev/null", WARNING);
+#endif
 		sleep(1); /* to get the first stats to cover this one second and avoids divide by zero issues */
 	     }
 	/* To get the pointers setup */
@@ -4093,8 +4205,6 @@ lparcfg.timebase = -1;
 		 */
 		proc_lparcfg();
 #endif
-
-		disk_stats_read = 0;
 
 		if(loop <= 3) /* This stops the nmon causing the cpu peak at startup */
 			for(i=0;i < max_cpus+1;i++)
@@ -4132,15 +4242,36 @@ mvprintw(x+2, 40, " nmon -?  - hint");
 mvprintw(x+3, 40, " nmon -h  - full");
 mvprintw(x+5, 40, "To start the same way every time");
 mvprintw(x+6, 40, " set the NMON ksh variable");
+#ifdef POWER
+get_cpu_cnt();
+proc_read(P_CPUINFO);
+mvprintw(x+10, 3, "POWER %s %s", &proc[P_CPUINFO].line[1][7], &proc[P_CPUINFO].line[proc[P_CPUINFO].lines-1][11]);
+mvprintw(x+11, 3, "POWER Clock=%s", &proc[P_CPUINFO].line[2][9]);
+mvprintw(x+12, 3, "POWER Entitlement=%-6.2f VirtualCPUs=%d LogicalCPUs=%d", (double)lparcfg.partition_entitled_capacity/100.0, (int)lparcfg.partition_active_processors, cpus);
+mvprintw(x+13, 3, "POWER SMT=%d Capped=%d", lparcfg.smt_mode, lparcfg.capped);
+                        mvwprintw(padcpu,5, 4, "cpuinfo: %s", proc[P_CPUINFO].line[1]);
+                        mvwprintw(padcpu,6, 4, "cpuinfo: %s", proc[P_CPUINFO].line[2]);
+                        mvwprintw(padcpu,7, 4, "cpuinfo: %s", proc[P_CPUINFO].line[3]);
+                        mvwprintw(padcpu,8, 4, "cpuinfo: %s", proc[P_CPUINFO].line[proc[P_CPUINFO].lines-1]);
 
-mvprintw(x+10, 3, "Use these keys to toggle statistics on/off:");
-mvprintw(x+11, 3, "   c = CPU        l = CPU Long-term   - = Faster screen updates");
-mvprintw(x+12, 3, "   m = Memory     j = Filesystems     + = Slower screen updates");
-mvprintw(x+13, 3, "   d = Disks      n = Network         V = Virtual Memory");
-mvprintw(x+14, 3, "   r = Resource   N = NFS             v = Verbose hints");
-mvprintw(x+15, 3, "   k = kernel     t = Top-processes   . = only busy disks/procs");
-mvprintw(x+16, 3, "   h = more options                   q = Quit");
-				x = x + 17;
+#endif
+#ifdef X86
+get_cpu_cnt();
+mvprintw(x+10, 3, "x86 %s %s", vendor_ptr, model_ptr);
+mvprintw(x+11, 3, "x86 MHz=%s bogomips=%s", mhz_ptr,bogo_ptr);
+if(processorchips || cores || hyperthreads || cpus) {
+mvprintw(x+12, 3, "x86 ProcessorChips=%d PhyscalCores=%d", processorchips, cores);
+mvprintw(x+13, 3, "x86 Hyperthreads  =%d VirtualCPUs =%d", hyperthreads, cpus);
+}
+#endif
+mvprintw(x+15, 3, "Use these keys to toggle statistics on/off:");
+mvprintw(x+16, 3, "   c = CPU        l = CPU Long-term   - = Faster screen updates");
+mvprintw(x+17, 3, "   m = Memory     j = Filesystems     + = Slower screen updates");
+mvprintw(x+18, 3, "   d = Disks      n = Network         V = Virtual Memory");
+mvprintw(x+19, 3, "   r = Resource   N = NFS             v = Verbose hints");
+mvprintw(x+20, 3, "   k = kernel     t = Top-processes   . = only busy disks/procs");
+mvprintw(x+21, 3, "   h = more options                   q = Quit");
+				x = x + 22;
 			}
 		} else {
 			if (!cursed && nmon_snap && (loop % nmon_one_in) == 0 ) {
@@ -4215,10 +4346,18 @@ mvprintw(x+16, 3, "   h = more options                   q = Quit");
 			mvwprintw(padcpu,7, 4, "cpuinfo: %s", proc[P_CPUINFO].line[3]);
 			mvwprintw(padcpu,8, 4, "cpuinfo: %s", proc[P_CPUINFO].line[4]);
 #else /* Intel is the default */
+mvwprintw(padcpu,5, 4, "cpuinfo: %s %s", vendor_ptr, model_ptr);
+mvwprintw(padcpu,6, 4, "cpuinfo: Hz=%s bogomips=%s", mhz_ptr,bogo_ptr);
+if(processorchips || cores || hyperthreads || cpus) {
+mvwprintw(padcpu,7, 4, "cpuinfo: ProcessorChips=%d PhyscalCores=%d", processorchips, cores);
+mvwprintw(padcpu,8, 4, "cpuinfo: Hyperthreads  =%d VirtualCPUs =%d", hyperthreads, cpus);
+}
+/*
 			mvwprintw(padcpu,5, 4, "cpuinfo: %s", proc[P_CPUINFO].line[4]);
 			mvwprintw(padcpu,6, 4, "cpuinfo: %s", proc[P_CPUINFO].line[1]);
 			mvwprintw(padcpu,7, 4, "cpuinfo: %s", proc[P_CPUINFO].line[6]);
 			mvwprintw(padcpu,8, 4, "cpuinfo: %s", proc[P_CPUINFO].line[17]);
+*/
 #endif /*MAINFRAME*/
 			mvwprintw(padcpu,9, 4, "# of CPUs: %d", cpus);
 #endif /*POWER*/
@@ -4316,9 +4455,11 @@ mvprintw(x+16, 3, "   h = more options                   q = Quit");
 						}
 						else {
 							if( lparcfg.purr_diff == 0 ) {
-								mvwprintw(padsmp,1,29," Phys. CPU used: <not available>");
+								mvwprintw(padsmp,1,29," EntitledCPU=% 6.3f--PhysicalCPUused= n/a",
+										(double)lparcfg.partition_entitled_capacity/100.0);
 							} else {
-								mvwprintw(padsmp,1,29," Phys. CPU used:% 7.2f ",
+								mvwprintw(padsmp,1,29," EntitledCPU=% 6.3f--PhysicalCPUused=% 7.3f",
+										(double)lparcfg.partition_entitled_capacity/100.0,
 										(double)lparcfg.purr_diff/(double)lparcfg.timebase/elapsed);
 							}
 						}
@@ -4335,8 +4476,19 @@ mvprintw(x+16, 3, "   h = more options                   q = Quit");
 					if( cpu_sum == 0)
 						cpu_sum = cpu_idle = 100.0;
 					if(smp_first_time && cursed) {
-						mvwprintw(padsmp,3 + i, 27, "| Please wait gathering data");
+						if(i == 0) 
+							mvwprintw(padsmp,3 + i, 27, "| Please wait gathering CPU statistics");
+						else
+							mvwprintw(padsmp,3 + i, 27, "|");
+						mvwprintw(padsmp,3 + i, 77, "|");
 					} else {
+#ifdef POWER
+						/* lparcfg gathered above */
+						if( lparcfg.smt_mode > 1 &&  i % lparcfg.smt_mode == 0) {
+							mvwprintw(padsmp,3 + i, 27, "*");
+							mvwprintw(padsmp,3 + i, 77, "*"); 
+						}
+#endif
 						if(!show_raw)
 							plot_smp(padsmp,i+1, 3 + i,
 							(double)cpu_user / (double)cpu_sum * 100.0,
@@ -4353,6 +4505,14 @@ mvprintw(x+16, 3, "   h = more options                   q = Quit");
 							  RAW(irq),
 							  RAW(softirq),
 							  RAW(steal));
+#ifdef POWER
+						/* lparcfg gathered above */
+						if( lparcfg.smt_mode > 1 &&  i % lparcfg.smt_mode == 0) {
+							mvwprintw(padsmp,3 + i, 27, "*");
+							mvwprintw(padsmp,3 + i, 77, "*"); 
+						}
+#endif
+
 					   RRD fprintf(fp,"rrdtool update cpu%02d.rrd %s:%.1f:%.1f:%.1f:%.1f\n",i,LOOP,
 						(double)cpu_user / (double)cpu_sum * 100.0,
 						(double)cpu_sys  / (double)cpu_sum * 100.0,
@@ -4361,6 +4521,31 @@ mvprintw(x+16, 3, "   h = more options                   q = Quit");
 					}
 				}	/* for (i = 0; i < cpus; i++) */
 				CURSE mvwprintw(padsmp,i + 3, 0, cpu_line);
+#ifdef POWER
+				/* proc_lparcfg called above in previous ifdef
+				 */
+					if( lparcfg.shared_processor_mode == 1)	{
+						if(lparcfg.timebase == -1) {
+							lparcfg.timebase=0;
+							proc_read(P_CPUINFO);
+							for(i=0;i<proc[P_CPUINFO].lines-1;i++) {
+								if(!strncmp("timebase",proc[P_CPUINFO].line[i],8)) {
+									sscanf(proc[P_CPUINFO].line[i],"timebase : %lld",&lparcfg.timebase);
+									break;
+								}
+							}
+						}
+						else {
+								mvwprintw(padsmp,i+3,29,"%s", lparcfg.shared_processor_mode ? "Shared": "Dedicsted");
+								mvwprintw(padsmp,i+3,39,"|");
+								mvwprintw(padsmp,i+3,41,"%s", lparcfg.capped ? "--Capped": "Uncapped");
+								mvwprintw(padsmp,i+3,51,"|");
+								mvwprintw(padsmp,i+3,54,"SMT=%d", lparcfg.smt_mode);
+								mvwprintw(padsmp,i+3,64,"|");
+								mvwprintw(padsmp,i+3,67,"VP=%.0f", (float)lparcfg.partition_active_processors);
+						}
+					}
+#endif
 				cpu_user = p->cpu_total.user - q->cpu_total.user;
 				cpu_sys  = p->cpu_total.sys  - q->cpu_total.sys;
 				cpu_wait = p->cpu_total.wait - q->cpu_total.wait;
@@ -4449,10 +4634,10 @@ mvprintw(x+16, 3, "   h = more options                   q = Quit");
 				} else {
 				mvwprintw(padlpar,1, 0, "LPAR=%d  SerialNumber=%s  Type=%s",
 					lparcfg.partition_id, lparcfg.serial_number, lparcfg.system_type);
-				mvwprintw(padlpar,2, 0, "Flags:      Shared-CPU=%-5s  Capped=%-5s   SMT-mode=%-7s",
+				mvwprintw(padlpar,2, 0, "Flags:      Shared-CPU=%-5s  Capped=%-5s   SMT-mode=%d",
 					lparcfg.shared_processor_mode?"true":"false",
 					lparcfg.capped?"true":"false",
-					lparcfg.smt_mode == 1 ? "off" : lparcfg.smt_mode==2 ? "SMT-2" : lparcfg.smt_mode==4 ? "SMT-4" : "unknown");
+					lparcfg.smt_mode);
 				mvwprintw(padlpar,3, 0, "Systems CPU Pool=%8.2f          Active=%8.2f    Total=%8.2f",
 					(float)lparcfg.pool_capacity,
 					(float)lparcfg.system_active_processors,
@@ -4497,7 +4682,7 @@ mvprintw(x+16, 3, "   h = more options                   q = Quit");
 			} else {
 				/* Only print LPAR info to spreadsheet if in shared processor mode */
 				if(ret != 0 && lparcfg.shared_processor_mode > 0)
-				    fprintf(fp,"LPAR,%s,%9.6f,%d,%d,%d,%d,%d,%.1f,%.1f,%.1f,%d,%d,%d,%d,%d,%d,%d,%d,%d,%lld\n",
+				    fprintf(fp,"LPAR,%s,%9.6f,%d,%d,%d,%d,%d,%.2f,%.2f,%.2f,%d,%d,%d,%d,%d,%d,%d,%d,%d,%.2f,%d\n",
 					LOOP,
 					(double)lparcfg.purr_diff/(double)lparcfg.timebase/elapsed,
 					lparcfg.capped,
@@ -4517,7 +4702,8 @@ mvprintw(x+16, 3, "   h = more options                   q = Quit");
 					lparcfg.BoundThrds,
 					lparcfg.MinMem,
 					lparcfg.unallocated_capacity,
-					lparcfg.pool_idle_time);
+					(double)lparcfg.pool_idle_diff/(double)lparcfg.timebase/elapsed,
+					lparcfg.smt_mode);
 			}
 		}
 #endif /*POWER*/
@@ -5821,7 +6007,6 @@ fprintf(fp,"VM,Paging and Virtual Memory,nr_dirty,nr_writeback,nr_unstable,nr_pa
 
 		if (show_top) {
 			/* Get the details of the running processes */
-			firstproc = 0;
 			skipped = 0;
 			n = getprocs(0);
 			if (n > p->nprocs) {
@@ -5830,7 +6015,6 @@ fprintf(fp,"VM,Paging and Virtual Memory,nr_dirty,nr_writeback,nr_unstable,nr_pa
 				p->nprocs = n;
 			}
 
-			firstproc = 0;
                         n = getprocs(1);
 
 			if (topper_size < n) {
@@ -6034,9 +6218,8 @@ redo:
 			errno = 0;
 			ret = sleep(secs); 
 			if( (ret != 0 || errno != 0) && loop != maxloops ) {
-				fprintf(fp,"ERROR,%s,sleep got interrupted:",LOOP);
-				fprintf(fp,"ret was %d, ",ret);
-				fprintf(fp,"errno was %d\n",errno);
+				fprintf(fp,"ERROR,%s, sleep interrupted, sleep(%d seconds), return value=%d",LOOP, secs, ret);
+				fprintf(fp,", errno=%d\n",errno);
 				secs=ret;
 				goto redo;
 			}
