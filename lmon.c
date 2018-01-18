@@ -34,7 +34,7 @@ KERNEL_2_6_18 1 kernel level and above adds the following to the disk stats
 #define RAW(member)      (long)((long)(p->cpuN[i].member)   - (long)(q->cpuN[i].member))
 #define RAWTOTAL(member) (long)((long)(p->cpu_total.member) - (long)(q->cpu_total.member))
 
-#define VERSION "16c"
+#define VERSION "16d"
 char version[] = VERSION;
 static char *SccsId = "nmon " VERSION;
 
@@ -5157,7 +5157,7 @@ mvwprintw(padwelcome,x+8, 3, "------------------------------");
 		mvwprintw(padwelcome, x + 5, 40,
 			  "To stop nmon type q to Quit");
 		COLOUR wattrset(padwelcome, COLOR_PAIR(1));
-#ifdef POWER
+#ifdef POWER 
 		get_cpu_cnt();
 		proc_read(P_CPUINFO);
 
@@ -5240,7 +5240,32 @@ mvwprintw(padwelcome,x+8, 3, "------------------------------");
 			  "Processor Clock=%s             %s",
 			  &proc[P_CPUINFO].line[2][9], lscpu.byte_order);
 
-#endif
+#endif /*POWER*/
+#ifdef MAINFRAME
+		get_cpu_cnt();
+		proc_read(P_CPUINFO);
+		lscpu_init();
+
+#ifdef SLES113
+		    mvwprintw(padwelcome, x + 8, 3, "%s %s", easy[0],
+			      easy[2]);
+#else
+#ifdef RHEL7
+		    mvwprintw(padwelcome, x + 8, 3, "%s %s", easy[0],
+			      easy[1]);
+#else
+		    mvwprintw(padwelcome, x + 8, 3, "%s", easy[3]);
+#endif /*RHEL*/
+#endif /*SLES*/
+
+		mvwprintw(padwelcome, x + 10, 3,
+			      "Mainframe VM %d CPUs & SMT=%d",
+			      cpus, lscpu.threads);
+		mvwprintw(padwelcome, x + 11, 3,
+			      "Mainframe VM Arch %s", lscpu.arch);
+		mvwprintw(padwelcome, x + 12, 3,
+			  "Processor %s", lscpu.byte_order);
+#endif /*MAINFRAME */
 #if X86 || ARM
 		get_cpu_cnt();
 		mvwprintw(padwelcome, x + 8, 3, "%s %s", easy[0], easy[2]);
@@ -7233,8 +7258,8 @@ mvwprintw(padwelcome,x+8, 3, "------------------------------");
 		mvwprintw(padnet, 1, PKIN, "Recv");
 		COLOUR wattrset(padnet, COLOR_PAIR(3));
 		mvwprintw(padnet, 1, PKOUT, "Trans");
+		COLOUR wattrset(padnet, COLOR_PAIR(0));
 	    }
-	    COLOUR wattrset(padnet, COLOR_PAIR(0));
 	    proc_net();
 	    for (i = 0; i < networks; i++) {
 
@@ -7255,6 +7280,7 @@ I/F Name Recv=KB/s Trans=KB/s packin packout insize outsize Peak->Recv Trans
     eth1     0.0     0.0       0.0      0.0     0.0    0.0       0.0      0.0
     eth0     0.0     0.0       0.0      0.0     0.0    0.0       0.0      0.0          
 */
+	        if (cursed) {
 		COLOUR wattrset(padnet, COLOR_PAIR(0));
 		mvwprintw(padnet, 2 + i, 0, "%8s",
 			  &p->ifnets[i].if_name[0]);
@@ -7282,6 +7308,7 @@ I/F Name Recv=KB/s Trans=KB/s packin packout insize outsize Peak->Recv Trans
 		COLOUR wattrset(padnet, COLOR_PAIR(3));
 		mvwprintw(padnet, 2 + i, PKOUT, "%8.1f",
 			  net_write_peak[i]);
+		}
 	    }
 	    DISPLAY(padnet, networks + 2);
 	    if (!cursed) {
