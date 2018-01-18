@@ -1,4 +1,3 @@
-
 /*
  * lmon.c -- Curses based Performance Monitor for Linux
  * with saving performance stats to a CSV file mode.
@@ -31,11 +30,11 @@ KERNEL_2_6_18 1 kernel level and above adds the following to the disk stats
 	pi_delayacct_blkio_ticks 
 */
                
-
+/* note: RAW assumes you are using the index "i" to select the CPU */
 #define RAW(member)      (long)((long)(p->cpuN[i].member)   - (long)(q->cpuN[i].member))
 #define RAWTOTAL(member) (long)((long)(p->cpu_total.member) - (long)(q->cpu_total.member)) 
 
-#define VERSION "16a" 
+#define VERSION "16b" 
 char version[] = VERSION;
 
 #include <stdio.h>
@@ -70,6 +69,7 @@ WINDOW * padneterr = NULL;
 WINDOW * padnfs = NULL;
 WINDOW * padres = NULL;
 WINDOW * padsmp = NULL;
+WINDOW * padutil = NULL;
 WINDOW * padwide = NULL;
 WINDOW * padgpu = NULL;
 WINDOW * padmhz = NULL;
@@ -708,6 +708,8 @@ int	show_para    = 1;
 int	show_headings= 1;
 int	show_res     = 0;
 int	show_smp     = 0;
+int	show_util    = 0;
+int	first_util = 1;
 int	show_wide    = 0;
 int	show_gpu     = 0;
 int	show_mhz     = 0;
@@ -745,7 +747,6 @@ int	show_dgroup  = 0; /* disk groups */
 int	auto_dgroup  = 0; /* disk groups defined via -g auto */
 int	disk_only_mode  = 0; /* disk stats shows disks only if user used -g auto */
 int     dgroup_loaded = 0; /* 0 = no, 1=needed, 2=loaded */
-int	show_raw    = 0;
 
 #define RRD if(show_rrd)  
 
@@ -940,6 +941,7 @@ int i;
 void   linux_bbbp(char *name, char *cmd, char *err)
 {
         int   i;
+        int   j;
         int   len;
 #define STRLEN 4096
         char   str[STRLEN];
@@ -956,12 +958,15 @@ void   linux_bbbp(char *name, char *cmd, char *err)
 			if(len>STRLEN) len=STRLEN;
                         if (str[len-1] == '\n') /*strip off the newline */
                                 str[len-1] = 0;
-                        /* fix lsconf style output so it does not confuse spread sheets */
+                        /* fix text starting characters that confuses spread sheets */
                         if(str[0] == '+') str[0]='p';
                         if(str[0] == '*') str[0]='m';
                         if(str[0] == '-') str[0]='n';
                         if(str[0] == '/') str[0]='d';
                         if(str[0] == '=') str[0]='e';
+			/* remove double quotes as it confuses spread sheets */
+			for(j=0; str[j] != 0;j++)
+				if(str[j] == '"') str[j]='Q';
                         fprintf(fp, "BBBP,%03d,%s,\"%s\"\n", lineno++, name, str);
                 }
                 pclose(pop);
@@ -1801,7 +1806,7 @@ long long guest_nice;
 	}
 	user = nice = sys = idle = iowait = hardirq = softirq = steal = guest = guest_nice = 0;
 	if(stat10 == 10) {
-		sscanf(&proc[P_STAT].line[0][5], "%lld %lld %lld %lld %lld %lld %lld %lld", 
+		sscanf(&proc[P_STAT].line[0][5], "%lld %lld %lld %lld %lld %lld %lld %lld %lld %lld", 
 			&user,
 			&nice,
 			&sys,
@@ -1809,10 +1814,12 @@ long long guest_nice;
 			&iowait,
 			&hardirq,
 			&softirq,
-			&steal);
+			&steal,
+			&guest,
+			&guest_nice);
 	} else { 
 		if(stat8 == 8) {
-			sscanf(&proc[P_STAT].line[0][5], "%lld %lld %lld %lld %lld %lld %lld %lld %lld %lld", 
+			sscanf(&proc[P_STAT].line[0][5], "%lld %lld %lld %lld %lld %lld %lld %lld", 
 				&user,
 				&nice,
 				&sys,
@@ -1820,9 +1827,7 @@ long long guest_nice;
 				&iowait,
 				&hardirq,
 				&softirq,
-				&steal,
-				&guest,
-				&guest_nice);
+				&steal);
 		} else { /* stat 4 variables here as older Linux proc */
 			sscanf(&proc[P_STAT].line[0][5], "%lld %lld %lld %lld", 
 				&user,
@@ -1831,16 +1836,16 @@ long long guest_nice;
 				&idle);
 		}
 	}
-	p->cpu_total.user = user + nice;
-	p->cpu_total.wait = iowait; /* in the case of 4 variables = 0 */
-	p->cpu_total.sys  = sys;
-	/* p->cpu_total.sys  = sys + hardirq + softirq + steal;*/
+	p->cpu_total.user = user;
+	p->cpu_total.nice = nice;
 	p->cpu_total.idle = idle;
+	p->cpu_total.sys  = sys;
+	p->cpu_total.wait = iowait; /* in the case of 4 variables = 0 */
+	/* p->cpu_total.sys  = sys + hardirq + softirq + steal;*/
 	
 	p->cpu_total.irq     = hardirq;
 	p->cpu_total.softirq = softirq;
 	p->cpu_total.steal   = steal;
-	p->cpu_total.nice    = nice;
 	p->cpu_total.guest   = guest;
 	p->cpu_total.guest_nice = guest_nice;
 
@@ -1861,34 +1866,48 @@ long long guest_nice;
 	    else if(i+1 > 10)  row = 6;
 	    else row = 5;
 
-	    if(stat8 == 8) {
-		sscanf(&proc[P_STAT].line[i+1][row], 
-			"%lld %lld %lld %lld %lld %lld %lld %lld", 
-		&user,
-		&nice,
-		&sys,
-		&idle,
-		&iowait,
-		&hardirq,
-		&softirq,
-		&steal);
-	    } else {
-		sscanf(&proc[P_STAT].line[i+1][row], "%lld %lld %lld %lld", 
-		&user,
-		&nice,
-		&sys,
-		&idle);
-	    }
-		p->cpuN[i].user = user + nice;
-		p->cpuN[i].wait = iowait;
-		p->cpuN[i].sys  = sys;
-		/*p->cpuN[i].sys  = sys + hardirq + softirq + steal;*/
-		p->cpuN[i].idle = idle;
+	    if(stat10 == 10) {
+			sscanf(&proc[P_STAT].line[i+1][row], 
+				"%lld %lld %lld %lld %lld %lld %lld %lld %lld %lld", 
+			&user,
+			&nice,
+			&sys,
+			&idle,
+			&iowait,
+			&hardirq,
+			&softirq,
+			&steal,
+			&guest,
+			&guest_nice);
 
+		} else if(stat8 == 8) {
+			sscanf(&proc[P_STAT].line[i+1][row], 
+				"%lld %lld %lld %lld %lld %lld %lld %lld", 
+			&user,
+			&nice,
+			&sys,
+			&idle,
+			&iowait,
+			&hardirq,
+			&softirq,
+			&steal);
+		    } else {
+			sscanf(&proc[P_STAT].line[i+1][row], "%lld %lld %lld %lld", 
+			&user,
+			&nice,
+			&sys,
+			&idle);
+		    }
+		p->cpuN[i].user = user;
+		p->cpuN[i].nice = nice;
+		p->cpuN[i].sys  = sys;
+		p->cpuN[i].idle = idle;
+		p->cpuN[i].wait = iowait;
 		p->cpuN[i].irq     = hardirq;
 		p->cpuN[i].softirq = softirq;
 		p->cpuN[i].steal   = steal;
-		p->cpuN[i].nice    = nice;
+		p->cpuN[i].guest   = guest;
+		p->cpuN[i].guest_nice   = guest_nice;
 	}
 
 	if(intr_line == 0) {
@@ -2557,30 +2576,6 @@ void save_snap(double user, double kernel, double iowait, double idle, double st
 	}
 }
 
-/* This puts the CPU usage on the screen and draws the CPU graphs or outputs to the file */
-
-void save_smp(WINDOW *pad, int cpu_no, int row, long user, long kernel, long iowait, long idle, long nice, long irq, long softirq, long steal)
-{
-static int firsttime = 1;
-	if (cursed) {
-		mvwprintw(pad,row,0, "%3d usr=%4ld sys=%4ld wait=%4ld idle=%4ld steal=%2ld nice=%4ld irq=%2ld sirq=%2ld\n",
-		cpu_no, user, kernel, iowait, idle, steal, nice, irq, softirq);
-		return;
-	}
-	if(firsttime) {
-		fprintf(fp,"CPUTICKS_ALL,AAA,user,sys,wait,idle,nice,irq,softirq,steal\n");
-		fprintf(fp,"CPUTICKS%03d,AAA,user,sys,wait,idle,nice,irq,softirq,steal\n", cpu_no);
-		firsttime=0;	
-	}
-	if(cpu_no==0) {
-	fprintf(fp,"CPUTICKS_ALL,%s,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld\n", 
-	        LOOP, user, kernel, iowait, idle, nice, irq, softirq, steal);
-	} else {
-	fprintf(fp,"CPUTICKS%03d,%s,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld\n",
-	cpu_no, LOOP, user, kernel, iowait, idle, nice, irq, softirq, steal);
-	}
-}
-
 void plot_smp(WINDOW *pad, int cpu_no, int row, double user, double kernel, double iowait, double idle, double steal)
 {
 	int	i;
@@ -3132,7 +3127,7 @@ void help(void)
 	printf("\t-l <dpl>      Disks per line in data capture to avoid spreadsheet width issues. Default 150. EMC=64.\n");
 	printf("\t-m <directory> nmon changes to this directory before saving to file\n");
 	printf("\t              Useful when starting nmon via cron\n");
-	printf("\t-M 		Adds MHz stats for each CPU thread. Some POWER8 model cores can be different frequencies\n");
+	printf("\t-M 		Adds MHz stats for each CPU thread. Some POWER8 model CPU cores can be different frequencies\n");
 	printf("\t-N            Include NFS Network File System for V2, V3 and V4\n");
 	printf("\t-p            nmon outputs the PID when it starts. Useful in scripts to capture the PID for a later safe stop.\n");
 	printf("\t-r <runname>  Use in a benchmark to record the run details for later analysis [default hostname]\n");
@@ -3140,6 +3135,7 @@ void help(void)
 	printf("\t-s <seconds>  Time between snap shots - with \"-c count\" decides duration of the data capture\n");
 	printf("\t-t            Include Top Processes in the output\n");
 	printf("\t-T            As -t plus it saves command line arguments in UARG section\n");
+	printf("\t-U            Include the Linux 10 CPU utilisation stats (CPUUTIL lines in the file)\n");
 	printf("\t-V            Print nmon version & exit immediately\n");
 	printf("\n");
 	printf("\tTo manually load nmon files into a spreadsheet:\n");
@@ -3195,9 +3191,10 @@ void help(void)
 	printf("\tr   = Resources: Machine type, name, cache details & OS version & Distro + LPAR\n");
 	printf("\tt   = Top Processes: select the data & order 1=Basic, 3=Perf 4=Size 5=I/O=root only\n");
 	printf("\tu   = Top Process with command line details\n");
+	printf("\tU   = CPU utilisation stats - all 10 Linux stats:\n");
+	printf("\t      user, user_nice, system, idle, iowait, irq, softirq, steal, guest, guest_nice\n");
 	printf("\tv   = Experimental Verbose mode - tries to make recommendations\n");
 	printf("\tV   = Virtual Memory stats\n");
-	printf("\tZ   = Experimental CPU numbers including interrupt time\n");
 	printf("\n");
 	printf("\tKey --- Other Interactive Controls ---\n");
 	printf("\t+   = Double the screen refresh time\n");
@@ -3611,6 +3608,10 @@ int checkinput(void)
 						show_args = ARGS_NONE;
 					wclear(padtop);
 					break;
+				case 'U':
+					FLIP(show_util);
+					wclear(padutil);
+					break;
 				case 'V':
 					FLIP(show_vm);
 					wclear(padpage);
@@ -3620,11 +3621,6 @@ int checkinput(void)
 					nocbreak();
 					endwin();
 					exit(0);
-				case 'Z':
-					FLIP(show_raw);
-					show_smp=1;
-					wclear(padsmp);
-					break;
 				default: return 0;
 				}
 			}
@@ -4152,6 +4148,7 @@ int main(int argc, char **argv)
          * 1: "hh:mm:ss,dd,mm,yyyy"
          */
         int   time_stamp_type =0;
+        long  ticks = 100;                /* Clock ticks per second used in /proc/stat cpu lines */
         unsigned long  pagesize = 1024*4; /* Default page size is 4 KB but newer servers compiled with 64 KB pages */
 	float average;
 	struct timeval nmon_tv; /* below is used to workout the nmon run, accumalate it and the 
@@ -4254,11 +4251,16 @@ printf("TIMESTAMP=%d.\n",time_stamp_type);
 
 	/* Check the version of OS */
 	uname(&uts);
-	if(sysconf(_SC_PAGESIZE) > 1024*4) /* Check if we have the large 64 KB memory page sizes compiled in to the kernel */
+	/* Get the clock ticks persecond for CPU counters in /proc/stat cpu stats */
+	ticks = sysconf(_SC_CLK_TCK);
+	if(ticks == -1 || ticks == 0)
+		ticks = 100;
+	/* Check if we have the large 64 KB memory page sizes compiled into the kernel */
+	if(sysconf(_SC_PAGESIZE) > 1024*4) 
 		pagesize = sysconf(_SC_PAGESIZE);
 	proc_init();
 
-	while ( -1 != (i = getopt(argc, argv, "?abc:C:Dd:EfF:g:hI:l:m:MNpr:Rs:tTVxXzZ" ))) {
+	while ( -1 != (i = getopt(argc, argv, "?abc:C:Dd:EfF:g:hI:l:m:MNpr:Rs:tTUVxXz" ))) {
 		switch (i) {
 		case '?':
 			hint();
@@ -4374,6 +4376,9 @@ printf("TIMESTAMP=%d.\n",time_stamp_type);
 			show_top     = 1; /* put top process output in spreadsheet mode */
 			show_topmode = 3;
 			break;
+		case 'U':
+			show_util=1;
+			break;
 		case 'V': /* nmon version */
 			printf("nmon version %s\n",VERSION);
 			exit(0);
@@ -4391,10 +4396,6 @@ printf("TIMESTAMP=%d.\n",time_stamp_type);
 		case 'z': /* background mode for 1 day output to /var/perf/tmp */
 			varperftmp++;
 			go_background(4*24, 15*60);
-			break;
-
-		case 'Z':
-			show_raw=1;
 			break;
 		}
 	}
@@ -4523,6 +4524,7 @@ printf("TIMESTAMP=%d.\n",time_stamp_type);
 		padpage = newpad(20,MAXCOLS);
 		padres = newpad(20,MAXCOLS);
 		padsmp = newpad(MAXROWS,MAXCOLS);
+		padutil = newpad(MAXROWS,MAXCOLS);
 		padlong = newpad(MAXROWS,MAXCOLS);
 		padwide = newpad(MAXROWS,MAXCOLS);
 		padmhz = newpad(24,MAXCOLS);
@@ -5053,28 +5055,29 @@ mvwprintw(padwelcome,x+20, 3, "                                        q = Quit"
 				mvwprintw(padres,9, 4, "Native Mode Physical CPU:%d  %s", cpus, lscpu.byte_order);
 				break;	
 			}
-#else 
+#else
 #ifdef MAINFRAME
 			mvwprintw(padres,5, 4, "cpuinfo: %s", proc[P_CPUINFO].line[1]);
 			mvwprintw(padres,6, 4, "cpuinfo: %s", proc[P_CPUINFO].line[2]);
 			mvwprintw(padres,7, 4, "cpuinfo: %s", proc[P_CPUINFO].line[3]);
 			mvwprintw(padres,8, 4, "cpuinfo: %s", proc[P_CPUINFO].line[4]);
-#else /* Intel is the default */
-mvwprintw(padres,5, 4, "cpuinfo: %s %s", vendor_ptr, model_ptr);
-mvwprintw(padres,6, 4, "cpuinfo: Hz=%s bogomips=%s", mhz_ptr,bogo_ptr);
-if(processorchips || cores || hyperthreads || cpus) {
-mvwprintw(padres,7, 4, "cpuinfo: ProcessorChips=%d PhyscalCores=%d", processorchips, cores);
-mvwprintw(padres,8, 4, "cpuinfo: Hyperthreads  =%d VirtualCPUs =%d", hyperthreads, cpus);
-}
-/*
-			mvwprintw(padres,5, 4, "cpuinfo: %s", proc[P_CPUINFO].line[4]);
-			mvwprintw(padres,6, 4, "cpuinfo: %s", proc[P_CPUINFO].line[1]);
-			mvwprintw(padres,7, 4, "cpuinfo: %s", proc[P_CPUINFO].line[6]);
-			mvwprintw(padres,8, 4, "cpuinfo: %s", proc[P_CPUINFO].line[17]);
-*/
-#endif /*MAINFRAME*/
+#else /* MAINFRAME */
+#ifdef X86
+			mvwprintw(padres,5, 4, "cpuinfo: %s %s", vendor_ptr, model_ptr);
+			mvwprintw(padres,6, 4, "cpuinfo: Hz=%s bogomips=%s", mhz_ptr,bogo_ptr);
+			if(processorchips || cores || hyperthreads || cpus) {
+				mvwprintw(padres,7, 4, "cpuinfo: ProcessorChips=%d PhyscalCores=%d", processorchips, cores);
+				mvwprintw(padres,8, 4, "cpuinfo: Hyperthreads  =%d VirtualCPUs =%d", hyperthreads, cpus);
+			}
+#else /* other platform perhaps ARM */
+                        mvwprintw(padres,5, 4, "cpuinfo: %s", proc[P_CPUINFO].line[4]);
+                        mvwprintw(padres,6, 4, "cpuinfo: %s", proc[P_CPUINFO].line[1]);
+                        mvwprintw(padres,7, 4, "cpuinfo: %s", proc[P_CPUINFO].line[6]);
+                        mvwprintw(padres,8, 4, "cpuinfo: %s", proc[P_CPUINFO].line[17]);
+#endif /* X86 */
+#endif /* MAINFRAME */
+#endif /* POWER */
 			mvwprintw(padres,9, 4, "# of CPUs: %d", cpus);
-#endif /*POWER*/
 			COLOUR wattrset(padres,COLOR_PAIR(5));
 			mvwprintw(padres,10, 4,"Machine  : %s", uts.machine);
 			mvwprintw(padres,11, 4,"Nodename : %s", uts.nodename);
@@ -5094,11 +5097,11 @@ mvwprintw(padres,8, 4, "cpuinfo: Hyperthreads  =%d VirtualCPUs =%d", hyperthread
 		if (show_longterm ) {
 				proc_read(P_STAT);
 				proc_cpu();
-				cpu_user = p->cpu_total.user - q->cpu_total.user; 
-				cpu_sys  = p->cpu_total.sys  - q->cpu_total.sys; 
-				cpu_wait = p->cpu_total.wait - q->cpu_total.wait; 
-				cpu_idle = p->cpu_total.idle - q->cpu_total.idle; 
-				cpu_steal= p->cpu_total.steal- q->cpu_total.steal; 
+				cpu_user = RAWTOTAL(user) + RAWTOTAL(nice);
+				cpu_sys  = RAWTOTAL(sys) + RAWTOTAL(irq) + RAWTOTAL(softirq) + RAWTOTAL(guest) + RAWTOTAL(guest_nice);
+				cpu_wait = RAWTOTAL(wait);
+				cpu_idle = RAWTOTAL(idle);
+				cpu_steal= RAWTOTAL(steal);
  /* DEBUG inject steal       cpu_steal = cpu_sys; */
 				cpu_sum = cpu_idle + cpu_user + cpu_sys + cpu_wait + cpu_steal;
 
@@ -5194,11 +5197,11 @@ mvwprintw(padres,8, 4, "cpuinfo: Hyperthreads  =%d VirtualCPUs =%d", hyperthread
 				}
 #endif
 				for (i = 0; i < cpus; i++) {
-					cpu_user = p->cpuN[i].user - q->cpuN[i].user;
-					cpu_sys  = p->cpuN[i].sys  - q->cpuN[i].sys;
-					cpu_wait = p->cpuN[i].wait - q->cpuN[i].wait;
-					cpu_idle = p->cpuN[i].idle - q->cpuN[i].idle;
-					cpu_steal= p->cpuN[i].steal- q->cpuN[i].steal;
+					cpu_user = RAW(user) + RAW(nice);
+					cpu_sys  = RAW(sys) + RAW(irq) + RAW(softirq) +RAW(guest) + RAW(guest_nice);
+					cpu_wait = RAW(wait); 
+					cpu_idle = RAW(idle);
+					cpu_steal= RAW(steal);
 /* DEBUG inject steal       cpu_steal = cpu_sys; */
 					cpu_sum = cpu_idle + cpu_user + cpu_sys + cpu_wait + cpu_steal;
 					/* Check if we had a CPU # change and have to set idle to 100 */
@@ -5218,23 +5221,12 @@ mvwprintw(padres,8, 4, "cpuinfo: Hyperthreads  =%d VirtualCPUs =%d", hyperthread
 							mvwprintw(padsmp,3 + i, 77, "*"); 
 						}
 #endif
-						if(!show_raw)
-							plot_smp(padsmp,i+1, 3 + i,
-							(double)cpu_user / (double)cpu_sum * 100.0,
-							(double)cpu_sys  / (double)cpu_sum * 100.0,
-							(double)cpu_wait / (double)cpu_sum * 100.0,
-							(double)cpu_idle / (double)cpu_sum * 100.0,
-							(double)cpu_steal / (double)cpu_sum * 100.0);
-						else
-							save_smp(padsmp,i+1, 3+i,
-							  RAW(user) - RAW(nice),
-							  RAW(sys),
-							  RAW(wait),
-							  RAW(idle),
-							  RAW(nice),
-							  RAW(irq),
-							  RAW(softirq),
-							  RAW(steal));
+						plot_smp(padsmp,i+1, 3 + i,
+						(double)cpu_user / (double)cpu_sum * 100.0,
+						(double)cpu_sys  / (double)cpu_sum * 100.0,
+						(double)cpu_wait / (double)cpu_sum * 100.0,
+						(double)cpu_idle / (double)cpu_sum * 100.0,
+						(double)cpu_steal / (double)cpu_sum * 100.0);
 #ifdef POWER
 						/* lparcfg gathered above */
 						if( lparcfg.smt_mode > 1 &&  i % lparcfg.smt_mode == 0) {
@@ -5266,7 +5258,7 @@ mvwprintw(padres,8, 4, "cpuinfo: Hyperthreads  =%d VirtualCPUs =%d", hyperthread
 							}
 						}
 						else {
-								mvwprintw(padsmp,i+3,29,"%s", lparcfg.shared_processor_mode ? "Shared": "Dedicsted");
+								mvwprintw(padsmp,i+3,29,"%s", lparcfg.shared_processor_mode ? "Shared": "Dedicated");
 								mvwprintw(padsmp,i+3,39,"|");
 								/* PowerKVM has no Capped concept */
 								if(power_vm_type == VM_POWERVM)
@@ -5278,11 +5270,11 @@ mvwprintw(padres,8, 4, "cpuinfo: Hyperthreads  =%d VirtualCPUs =%d", hyperthread
 						}
 					}
 #endif
-				cpu_user = p->cpu_total.user - q->cpu_total.user;
-				cpu_sys  = p->cpu_total.sys  - q->cpu_total.sys;
-				cpu_wait = p->cpu_total.wait - q->cpu_total.wait;
-				cpu_idle = p->cpu_total.idle - q->cpu_total.idle;
-				cpu_steal= p->cpu_total.steal- q->cpu_total.steal;
+				cpu_user = RAWTOTAL(user) + RAWTOTAL(nice);
+				cpu_sys  = RAWTOTAL(sys) + RAWTOTAL(irq) + RAWTOTAL(softirq) + RAWTOTAL(guest) + RAWTOTAL(guest_nice);
+				cpu_wait = RAWTOTAL(wait);
+				cpu_idle = RAWTOTAL(idle);
+				cpu_steal= RAWTOTAL(steal);
 /* DEBUG inject steal       cpu_steal = cpu_sys; */
 				cpu_sum = cpu_idle + cpu_user + cpu_sys + cpu_wait + cpu_steal;
 
@@ -5298,24 +5290,12 @@ mvwprintw(padres,8, 4, "cpuinfo: Hyperthreads  =%d VirtualCPUs =%d", hyperthread
 						(double)cpu_steal/ (double)cpu_sum * 100.0);
 				if (cpus > 1 || !cursed) {
 					if(!smp_first_time || !cursed) {
-						if(!show_raw) {
-							plot_smp(padsmp,0, 4 + i,
-							(double)cpu_user / (double)cpu_sum * 100.0,
-							(double)cpu_sys  / (double)cpu_sum * 100.0,
-							(double)cpu_wait / (double)cpu_sum * 100.0,
-							(double)cpu_idle / (double)cpu_sum * 100.0,
-							(double)cpu_steal/ (double)cpu_sum * 100.0);
-						} else {
-							save_smp(padsmp,0, 4+i,
-							  RAWTOTAL(user) - RAWTOTAL(nice),
-							  RAWTOTAL(sys),
-							  RAWTOTAL(wait),
-							  RAWTOTAL(idle),
-							  RAWTOTAL(nice),
-							  RAWTOTAL(irq),
-							  RAWTOTAL(softirq),
-							  RAWTOTAL(steal));
-						}
+						plot_smp(padsmp,0, 4 + i,
+						(double)cpu_user / (double)cpu_sum * 100.0,
+						(double)cpu_sys  / (double)cpu_sum * 100.0,
+						(double)cpu_wait / (double)cpu_sum * 100.0,
+						(double)cpu_idle / (double)cpu_sum * 100.0,
+						(double)cpu_steal/ (double)cpu_sum * 100.0);
 					}
 
 					CURSE mvwprintw(padsmp, i + 5, 0, cpu_line);
@@ -5355,8 +5335,8 @@ char *wide10 = " 10%%-|                                                         
 					mvwprintw(padwide,3, 7, " Please wait gathering CPU statistics");
 				} else {
 					for (i = 0; i < cpus && i < 64; i++) {
-						cpu_user = p->cpuN[i].user - q->cpuN[i].user;
-						cpu_sys  = p->cpuN[i].sys  - q->cpuN[i].sys;
+						cpu_user = RAW(user) + RAW(nice);
+						cpu_sys  = RAW(sys) + RAW(irq) + RAW(softirq) + RAW(guest) + RAW(guest_nice);
 						cpu_sum = cpu_user + cpu_sys;
 						COLOUR wattrset(padwide, COLOR_PAIR(4)); /* blue */
 						if(i%2) {
@@ -5397,8 +5377,8 @@ char *wide10 = " 10%%-|                                                         
 						mvwprintw(padwide,rows+3, 7, " Please wait gathering CPU statistics");
 					} else {
 						for (i = 64; i < cpus && i < 128; i++) {
-							cpu_user = p->cpuN[i].user - q->cpuN[i].user;
-							cpu_sys  = p->cpuN[i].sys  - q->cpuN[i].sys;
+							cpu_user = RAW(user) + RAW(nice);
+							cpu_sys  = RAW(sys) + RAW(irq) + RAW(softirq) + RAW(guest) + RAW(guest_nice);
 							cpu_sum = cpu_user + cpu_sys;
 							COLOUR wattrset(padwide, COLOR_PAIR(4)); /* blue */
 							if(i%2) {
@@ -5444,8 +5424,8 @@ char *wide10 = " 10%%-|                                                         
 						mvwprintw(padwide,rows+3, 7, " Please wait gathering CPU statistics");
 					} else {
 						for (i = 128; i < cpus && i < 196; i++) {
-							cpu_user = p->cpuN[i].user - q->cpuN[i].user;
-							cpu_sys  = p->cpuN[i].sys  - q->cpuN[i].sys;
+							cpu_user = RAW(user) + RAW(nice);
+							cpu_sys  = RAW(sys) + RAW(irq) + RAW(softirq) + RAW(guest) + RAW(guest_nice);
 							cpu_sum = cpu_user + cpu_sys;
 							COLOUR wattrset(padwide, COLOR_PAIR(4)); /* blue */
 							if(i%2) {
@@ -5482,10 +5462,10 @@ char *wide10 = " 10%%-|                                                         
 			proc_cpu();
 
 			if(show_verbose && cursed) {
-				cpu_user = p->cpu_total.user - q->cpu_total.user; 
-				cpu_sys  = p->cpu_total.sys  - q->cpu_total.sys; 
-				cpu_wait = p->cpu_total.wait - q->cpu_total.wait; 
-				cpu_idle = p->cpu_total.idle - q->cpu_total.idle; 
+				cpu_user = RAWTOTAL(user) + RAWTOTAL(nice);
+				cpu_sys  = RAWTOTAL(sys) + RAWTOTAL(irq) + RAWTOTAL(softirq) + RAWTOTAL(guest) + RAWTOTAL(guest_nice);
+				cpu_wait = RAWTOTAL(wait);
+				cpu_idle = RAWTOTAL(idle) + RAWTOTAL(steal);
 				cpu_sum = cpu_idle + cpu_user + cpu_sys + cpu_wait;
 
 				cpu_busy= (double)(cpu_user + cpu_sys)/ (double)cpu_sum * 100.0; 
@@ -5507,6 +5487,94 @@ char *wide10 = " 10%%-|                                                         
 
 		     }	/* if (cursed) */
 		}	/* if (show_smp || show_verbose) */
+		if (show_util) {
+			proc_read(P_STAT);
+			proc_cpu();
+		    	if(cursed) {
+				BANNER(padutil,"CPU Utilisation Stats");
+				mvwprintw(padutil,2, 0, "CPU");
+				for (i = 0; i < cpus; i++) mvwprintw(padutil,3+i,0, "%3d", i+1); 
+				mvwprintw(padutil,1, 0, "ALL");
+				if(first_util) {
+					mvwprintw(padutil,5, 27, " Please wait gathering CPU statistics");
+				} else {
+					COLOUR wattrset(padutil, COLOR_PAIR(2)); /* Green */
+					                           mvwprintw(padutil,2,   4, "  User%%");
+					for (i = 0; i < cpus; i++) mvwprintw(padutil,3+i, 4, "%7.1f",      RAW(user)/elapsed);
+					                           mvwprintw(padutil,1  , 4, "%7.1f", RAWTOTAL(user)/elapsed);
+					                           mvwprintw(padutil,2,  11, "  Nice%%");
+					for (i = 0; i < cpus; i++) mvwprintw(padutil,3+i,11, "%7.1f",      RAW(nice)/elapsed);
+					                           mvwprintw(padutil,1  ,11, "%7.1f", RAWTOTAL(nice)/elapsed);
+
+					COLOUR wattrset(padutil, COLOR_PAIR(1)); /* Red */
+					                           mvwprintw(padutil,2,  18, "   Sys%%");
+					for (i = 0; i < cpus; i++) mvwprintw(padutil,3+i,18, "%7.1f",      RAW(sys)/elapsed);
+					                           mvwprintw(padutil,1  ,18, "%7.1f", RAWTOTAL(sys)/elapsed);
+
+					COLOUR wattrset(padutil, COLOR_PAIR(3)); /* Yellow */
+					                           mvwprintw(padutil,2,  25, "  Idle%%");
+					for (i = 0; i < cpus; i++) mvwprintw(padutil,3+i,25, "%7.1f",      RAW(idle)/elapsed);
+					                           mvwprintw(padutil,1  ,25, "%7.1f", RAWTOTAL(idle)/elapsed);
+					                           mvwprintw(padutil,2,  32, "  Wait%%");
+					for (i = 0; i < cpus; i++) mvwprintw(padutil,3+i,32, "%7.1f",      RAW(wait)/elapsed);
+					                           mvwprintw(padutil,1  ,32, "%7.1f", RAWTOTAL(wait)/elapsed);
+
+					COLOUR wattrset(padutil, COLOR_PAIR(1)); /* Red */
+					                           mvwprintw(padutil,2,  39, " HWirq%%");
+					for (i = 0; i < cpus; i++) mvwprintw(padutil,3+i,39, "%7.1f",      RAW(irq)/elapsed);
+					                           mvwprintw(padutil,1  ,39, "%7.1f", RAWTOTAL(irq)/elapsed);
+					                           mvwprintw(padutil,2,  46, " SWirq%%");
+					for (i = 0; i < cpus; i++) mvwprintw(padutil,3+i,46, "%7.1f",      RAW(softirq)/elapsed);
+					                           mvwprintw(padutil,1  ,46, "%7.1f", RAWTOTAL(softirq)/elapsed);
+
+					COLOUR wattrset(padutil, COLOR_PAIR(5)); /* Magenta */
+					                           mvwprintw(padutil,2,  53, " Steal%%");
+					for (i = 0; i < cpus; i++) mvwprintw(padutil,3+i,53, "%7.1f",      RAW(steal)/elapsed);
+					                           mvwprintw(padutil,1  ,53, "%7.1f", RAWTOTAL(steal)/elapsed);
+
+					COLOUR wattrset(padutil, COLOR_PAIR(6)); /* Cyan */
+					                           mvwprintw(padutil,2,  60, " Guest%%");
+					for (i = 0; i < cpus; i++) mvwprintw(padutil,3+i,60, "%7.1f",      RAW(guest)/elapsed);
+					                           mvwprintw(padutil,1  ,60, "%7.1f", RAWTOTAL(guest)/elapsed);
+					                           mvwprintw(padutil,2,  67, " GuestNice%%");
+					for (i = 0; i < cpus; i++) mvwprintw(padutil,3+i,67, "%7.1f",      RAW(guest_nice)/elapsed);
+					                           mvwprintw(padutil,1  ,67, "%7.1f", RAWTOTAL(guest_nice)/elapsed);
+				}
+				COLOUR wattrset(padutil, COLOR_PAIR(0)); 
+				DISPLAY(padutil, i + 3);
+			} else {
+				if(first_util) {
+					fprintf(fp,"CPUUTIL_ALL,CPU Util Stats %s,User%%,Nice%%,Sys%%,Idle%%,Wait%%,Irq%%,Softirq%%,Steal%%,Guest%%,Guest_nice%%\n", run_name);
+					for (i=1; i <= cpus; i++)
+						fprintf(fp,"CPUUTIL%03d,CPU Util Stats CPU%d %s,User%%,Nice%%,Sys%%,Idle%%,Wait%%,Irq%%,Softirq%%,Steal%%,Guest%%,Guest_nice%%\n", i, i, run_name);
+				}
+				fprintf(fp,"CPUUTIL_ALL,%s,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f\n", LOOP, 
+				  RAWTOTAL(user)/elapsed,
+				  RAWTOTAL(nice)/elapsed,
+				  RAWTOTAL(sys)/elapsed,
+				  RAWTOTAL(idle)/elapsed,
+				  RAWTOTAL(wait)/elapsed,
+				  RAWTOTAL(irq)/elapsed,
+				  RAWTOTAL(softirq)/elapsed,
+				  RAWTOTAL(steal)/elapsed,
+				  RAWTOTAL(guest)/elapsed,
+				  RAWTOTAL(guest_nice)/elapsed);
+				for (i = 0; i < cpus; i++) {
+					fprintf(fp,"CPUUTIL%03d,%s,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f\n", i, LOOP, 
+					  RAW(user)/elapsed,
+					  RAW(nice)/elapsed,
+					  RAW(sys)/elapsed,
+					  RAW(idle)/elapsed,
+					  RAW(wait)/elapsed,
+					  RAW(irq)/elapsed,
+					  RAW(softirq)/elapsed,
+					  RAW(steal)/elapsed,
+					  RAW(guest)/elapsed,
+					  RAW(guest_nice)/elapsed);
+				}
+			}
+			first_util=0;
+		}
 #ifdef POWER
 		if (show_lpar) {
 			if(lparcfg.timebase == -1) {
@@ -6152,29 +6220,33 @@ fprintf(fp,"VM,Paging and Virtual Memory,nr_dirty,nr_writeback,nr_unstable,nr_pa
 			proc_kernel();
 			if(cursed) {
 				BANNER(padker,"Kernel and Load Average");
-#define MORECOL 24
-#define LOADCOL 44
-#define BOOTCOL 58
+#define MORECOL 21
+#define LOADCOL 41
+#define BOOTCOL 55
+				COLOUR wattrset(padker,COLOR_PAIR(1));
+				mvwprintw(padker,1, 0, "Global-CPU-Stats---->");
+				mvwprintw(padker,2, 0, " /proc/stat line 1");
+				mvwprintw(padker,3, 0, "%ld ticks per second",ticks);
+				mvwprintw(padker,4, 0, "100%%=1 CPUcoreThread");
 				COLOUR wattrset(padker,COLOR_PAIR(2));
-				mvwprintw(padker,1, 0, "Global-CPU-Stats------->");
-				mvwprintw(padker,2, 0, "1st line of /proc/stat");
-				mvwprintw(padker,4, 0, "%8lld   RunQueue", p->cpu_total.running);
-				mvwprintw(padker,5, 0, "%8lld   Blocked", p->cpu_total.blocked);
-				mvwprintw(padker,6, 0, "%10.1f ContextSwitch", (float)(p->cpu_total.ctxt  - q->cpu_total.ctxt)/elapsed);
-				mvwprintw(padker,7, 0, "%10.1f Forks", (float)(p->cpu_total.procs - q->cpu_total.procs)/elapsed);
-				mvwprintw(padker,8, 0, "%10.1f Interrupts", (float)(p->cpu_total.intr  - q->cpu_total.intr)/elapsed);
-				mvwprintw(padker,9, 0, "%8lld Bootime", p->cpu_total.btime);
+				mvwprintw(padker,5, 0, "%8lld   RunQueue", p->cpu_total.running);
+				mvwprintw(padker,6, 0, "%8lld   Blocked", p->cpu_total.blocked);
+				mvwprintw(padker,7, 0, "%10.1f Context", (float)(p->cpu_total.ctxt  - q->cpu_total.ctxt)/elapsed);
+				mvwprintw(padker,8, 0, "           Switch");
+				mvwprintw(padker,9, 0, "%10.1f Forks", (float)(p->cpu_total.procs - q->cpu_total.procs)/elapsed);
+				mvwprintw(padker,10, 0, "%10.1f Interrupts", (float)(p->cpu_total.intr  - q->cpu_total.intr)/elapsed);
 
-				mvwprintw(padker, 1, MORECOL,"%8.1f%% user",      (float)(p->cpu_total.user  - q->cpu_total.user)/elapsed);
-				mvwprintw(padker, 2, MORECOL,"%8.1f%% user_nice",  (float)(p->cpu_total.nice  - q->cpu_total.nice)/elapsed);
-				mvwprintw(padker, 3, MORECOL,"%8.1f%% system",    (float)(p->cpu_total.sys  - q->cpu_total.sys)/elapsed);
-				mvwprintw(padker, 4, MORECOL,"%8.1f%% idle",      (float)(p->cpu_total.idle  - q->cpu_total.idle)/elapsed);
-				mvwprintw(padker, 5, MORECOL,"%8.1f%% iowait",    (float)(p->cpu_total.wait  - q->cpu_total.wait)/elapsed);
-				mvwprintw(padker, 6, MORECOL,"%8.1f%% irq",       (float)(p->cpu_total.irq  - q->cpu_total.irq)/elapsed);
-				mvwprintw(padker, 7, MORECOL,"%8.1f%% softirq",   (float)(p->cpu_total.softirq  - q->cpu_total.softirq)/elapsed);
-				mvwprintw(padker, 8, MORECOL,"%8.1f%% steal",     (float)(p->cpu_total.steal  - q->cpu_total.steal)/elapsed);
-				mvwprintw(padker, 9, MORECOL,"%8.1f%% guest",     (float)(p->cpu_total.guest  - q->cpu_total.guest)/elapsed);
-				mvwprintw(padker,10, MORECOL,"%8.1f%% guest_nice",(float)(p->cpu_total.guest_nice  - q->cpu_total.guest_nice)/elapsed);
+				COLOUR wattrset(padker,COLOR_PAIR(1));
+				mvwprintw(padker, 1, MORECOL,"%8.1f%% user",      (float)(RAWTOTAL(user))/elapsed);
+				mvwprintw(padker, 2, MORECOL,"%8.1f%% user_nice",  (float)(RAWTOTAL(nice))/elapsed);
+				mvwprintw(padker, 3, MORECOL,"%8.1f%% system",    (float)(RAWTOTAL(sys))/elapsed);
+				mvwprintw(padker, 4, MORECOL,"%8.1f%% idle",      (float)(RAWTOTAL(idle))/elapsed);
+				mvwprintw(padker, 5, MORECOL,"%8.1f%% iowait",    (float)(RAWTOTAL(wait))/elapsed);
+				mvwprintw(padker, 6, MORECOL,"%8.1f%% irq",       (float)(RAWTOTAL(irq))/elapsed);
+				mvwprintw(padker, 7, MORECOL,"%8.1f%% softirq",   (float)(RAWTOTAL(softirq))/elapsed);
+				mvwprintw(padker, 8, MORECOL,"%8.1f%% steal",     (float)(RAWTOTAL(steal))/elapsed);
+				mvwprintw(padker, 9, MORECOL,"%8.1f%% guest",     (float)(RAWTOTAL(guest))/elapsed);
+				mvwprintw(padker,10, MORECOL,"%8.1f%% guest_nice",(float)(RAWTOTAL(guest_nice))/elapsed);
 
 				COLOUR wattrset(padker,COLOR_PAIR(3));
 				mvwprintw(padker,1, LOADCOL, "Load Average");
@@ -6203,6 +6275,7 @@ fprintf(fp,"VM,Paging and Virtual Memory,nr_dirty,nr_writeback,nr_unstable,nr_pa
 				else
 					mvwprintw(padker,5, BOOTCOL, "Uptime has overflowed");
 				mvwprintw(padker,7, BOOTCOL, "%d CPU core threads",cpus);
+				mvwprintw(padker,9, BOOTCOL, "%8lld Bootime", p->cpu_total.btime);
 				COLOUR wattrset(padker,COLOR_PAIR(0));
 				DISPLAY(padker,11);
 			} else {
