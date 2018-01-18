@@ -23,7 +23,7 @@ nmon: lnmon.o
 #define RAW(member)      (long)((long)(p->cpuN[i].member)   - (long)(q->cpuN[i].member))
 #define RAWTOTAL(member) (long)((long)(p->cpu_total.member) - (long)(q->cpu_total.member)) 
 
-#define VERSION "15e" 
+#define VERSION "15f" 
 char version[] = VERSION;
 static char *SccsId = "nmon " VERSION;
 
@@ -396,6 +396,8 @@ int	show_rrd     = 0;
 int	show_lpar    = 0;
 int	show_vm    = 0;
 int	show_dgroup  = 0; /* disk groups */
+int	auto_dgroup  = 0; /* disk groups defined via -g auto */
+int	disk_only_mode  = 0; /* disk stats shows disks only if user used -g auto */
 int     dgroup_loaded = 0; /* 0 = no, 1=needed, 2=loaded */
 int	show_raw    = 0;
 
@@ -2504,6 +2506,12 @@ void load_dgroup(struct dsk_stat *dk)
 	for (dgroup_total_groups = 0; 
 		fgets(line, 4096-1, gp) != NULL && dgroup_total_groups < DGROUPS; 
 		dgroup_total_groups++) {
+		/* ignore lines starting with # */
+		if(line[0] == '#' ) { /* was a comment line */
+			/* Decrement dgroup_total_groups by 1 to correct index for next loop */
+			--dgroup_total_groups;
+			continue;
+		}
 		/* save the name */
 		nextp = save_word(line, name);
 		if(strlen(name) == 0) { /* was a blank line */
@@ -2668,6 +2676,18 @@ void list_dgroup(struct dsk_stat *dk)
 	}
 }
 
+int is_dgroup_name(char *name)
+{
+int i;
+	for (i = 0; i < DGROUPS; i++) {
+		if(dgroup_name[i] == (char *)0 ) 
+			return 0;
+		if (strncmp(name,dgroup_name[i],strlen(name)) == 0)
+			return 1;
+	}
+	return 0;
+}
+
 
 
 void hint(void)
@@ -2693,12 +2713,13 @@ void help(void)
 	printf("Version - %s\n\n",SccsId);
 	printf("For Interactive-Mode\n");
 	printf("\t-s <seconds>  time between refreshing the screen [default 2]\n");
-	printf("\t-c <number>   of refreshes [default millions]\n");
+	printf("\t-c <number>   count of screen refreshes [default millions]\n");
 	printf("\t-g <filename> User Defined Disk Groups [hit g to show them]\n");
 	printf("\t              - file = on each line: group_name <disks list> space separated\n");
 	printf("\t              - like: database sdb sdc sdd sde\n");
 	printf("\t              - upto 64 disk groups, 512 disks per line\n");
 	printf("\t              - disks can appear more than once and in many groups\n");
+	printf("\t-g auto       - will make a file called \"auto\" with just disks fron \"lsblk|grep disk\" output\n");
 	printf("\t-b            black and white [default is colour]\n");
 	printf("\texample: %s -s 1 -c 100\n",progname);
 	printf("\n");
@@ -2715,6 +2736,8 @@ void help(void)
 	printf("\t-d <disks>    to increase the number of disks [default 256]\n");
 	printf("\t-l <dpl>      disks/line default 150 to avoid spreadsheet issues. EMC=64.\n");
 	printf("\t-g <filename> User Defined Disk Groups (see above) - see BBBG & DG lines\n");
+	printf("\t-g auto       As above but makes the file \"auto\" for you of just the disks like sda etc.\n");
+	printf("\t-D            Use with -g to add the Disk wait/service time & inflight stats.\n");
 
 	printf("\t-N            include NFS Network File System\n");
 	printf("\t-I <percent>  Include process & disks busy threshold (default 0.1)\n");
@@ -2751,7 +2774,8 @@ void help(void)
 	printf("\td   = Disk I/O Graphs\n");
 	printf("\tD   = Disk I/O Stats\n");
 	printf("\to   = Disk I/O Map (one character per disk showing how busy it is)\n");
-	printf("\to   = User Defined Disk Groups\n");
+	printf("\tg   = User Defined Disk Groups        (assumes -g <file> when nmon started)\n");
+	printf("\tG   = Change Disk stats to just disks (assumes -g auto   when nmon started)\n");
 	printf("\tj   = File Systems \n");
 	printf("\tt   = Top Process stats use 1,3,4,5 to select the data & order\n");
 	printf("\tu   = Top Process full command details\n");
@@ -3148,6 +3172,12 @@ int checkinput(void)
 				case ' ':
 					clear();
 					break;
+				case 'G':
+					if(auto_dgroup) {
+						FLIP(disk_only_mode);
+						clear();
+					}
+                                        break;
 				case 'g':
 					FLIP(show_dgroup);
                                         clear();
@@ -3887,6 +3917,16 @@ printf("TIMESTAMP=%d.\n",time_stamp_type);
                         show_dgroup = 1;
                         dgroup_loaded = 1;
                         dgroup_filename = optarg;
+			if( strncmp("auto",dgroup_filename,5) == 0) {
+				auto_dgroup++;
+				printf("Generating disk group file from lsblk output to file: \"auto\"\n");
+				ret = system("lsblk --nodeps --output NAME,TYPE --raw | grep disk | awk 'BEGIN {printf \"# This file created by: nmon -g auto\\n# It is an automatically generated disk-group file which excluses disk paritions\\n\" } { printf \"%s %s\\n\", $1, $1 }' >auto");
+				if(ret != 0 ) {
+					printf("Create auto file command was: %s\n", 
+						"lsblk --nodeps --output NAME,TYPE --raw | grep disk | awk '{ printf \"%s %s\\n\", $1, $1 }' >auto"); 
+					printf("Creating auto file returned a status of %d\n", ret );
+				}
+			}
                         break;
 		}
 	}
@@ -5609,14 +5649,14 @@ fprintf(fp,"VM,Paging and Virtual Memory,nr_dirty,nr_writeback,nr_unstable,nr_pa
 					else {
 						str_p=&jfs[k].device[i-20];
 					}
-				    mvwprintw(padjfs,2+k, 0, "%-20s %7.0f %7.0f %4.0f%% %-8s %s",
-					str_p,
-					fs_size,
-					fs_free,
-					ceil(fs_size_used),
-					jfs[k].type,
-					jfs[k].name
-					);
+					mvwprintw(padjfs,2+k, 0, "%-20s %7.0f %7.0f %4.0f%% %-8s %s",
+						str_p,
+						fs_size,
+						fs_free,
+						ceil(fs_size_used),
+						jfs[k].type,
+						jfs[k].name
+						);
 
 					} else {
 					mvwprintw(padjfs,2+k, 0, "%s", jfs[k].name);
@@ -5784,6 +5824,9 @@ fprintf(fp,"VM,Paging and Virtual Memory,nr_dirty,nr_writeback,nr_unstable,nr_pa
 					}
 				}
 				for (i = 0,k=0; i < disks; i++) {
+					if(disk_only_mode && is_dgroup_name(p->dk[i].dk_name) == 0)
+						continue;
+
 /*
 					if(p->dk[i].dk_name[0] == 'h')
 						continue;
